@@ -3,15 +3,22 @@
 import IDE from "@/components/IDE";
 import { PreviewPane } from "@/components/PreviewPane";
 import { Sparkles, Send } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export default function Page() {
   const [previewVisible, setPreviewVisible] = useState(true);
   const [input, setInput] = useState("");
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+
+  // ✅ Load workspaceId from sessionStorage
+  useEffect(() => {
+    const id = sessionStorage.getItem("workspaceId");
+    if (id) setWorkspaceId(id);
+  }, []);
 
   const handleSend = () => {
     if (!input.trim()) return;
-    console.log("AI Prompt:", input);
+    console.log("🤖 AI Prompt:", input);
     setInput("");
   };
 
@@ -49,9 +56,9 @@ export default function Page() {
       </div>
 
       {/* ✅ Right: Preview Panel (fills entire right side) */}
-      {previewVisible && (
+      {previewVisible && workspaceId && (
         <div className="flex flex-col flex-[0.4] min-w-[360px] max-w-[720px] bg-[#0a0a0a] transition-all duration-300">
-          <PreviewPane />
+          <PreviewPane workspaceId={workspaceId} />
         </div>
       )}
     </div>
