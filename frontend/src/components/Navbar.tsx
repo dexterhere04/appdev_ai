@@ -1,5 +1,5 @@
 import { Save, Play, Eye, EyeOff, Settings, Share2 } from "lucide-react";
-
+import { useBuild } from "@/context/BuildContext";
 interface NavbarProps {
   workspaceId: string;
   onSave: () => void;
@@ -11,10 +11,11 @@ interface NavbarProps {
 export function Navbar({
   workspaceId,
   onSave,
-  onBuild,
   onTogglePreview,
   previewVisible = true,
 }: NavbarProps) {
+  const { triggerBuild } = useBuild();
+
   return (
     <div className="h-14 bg-[#0d0d0d] border-b border-gray-800 flex items-center justify-between px-4">
       {/* Left section - Project info */}
@@ -40,7 +41,7 @@ export function Navbar({
         </button>
 
         <button
-          onClick={onBuild}
+          onClick={triggerBuild}
           className="flex items-center gap-2 px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 rounded-md transition-colors font-medium"
         >
           <Play size={16} />

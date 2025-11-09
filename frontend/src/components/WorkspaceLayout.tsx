@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { BuildProvider } from "@/context/BuildContext"; 
 import {
   FolderOpen,
   Code2,
@@ -31,22 +32,23 @@ export function ChatWorkspaceLayout({
     },
   ]);
 
-  const handleSend = () => {
-    if (!input.trim()) return;
+  // const handleSend = () => {
+  //   if (!input.trim()) return;
 
-    setMessages((prev) => [
-      ...prev,
-      { type: "user", content: input, timestamp: new Date() },
-      {
-        type: "ai",
-        content: "This is a placeholder response. AI integration coming soon!",
-        timestamp: new Date(),
-      },
-    ]);
-    setInput("");
-  };
+  //   setMessages((prev) => [
+  //     ...prev,
+  //     { type: "user", content: input, timestamp: new Date() },
+  //     {
+  //       type: "ai",
+  //       content: "This is a placeholder response. AI integration coming soon!",
+  //       timestamp: new Date(),
+  //     },
+  //   ]);
+  //   setInput("");
+  // };
 
   return (
+    <BuildProvider>
     <div className="flex h-screen w-screen bg-[#0a0a0a] text-gray-200 overflow-hidden">
       {/* Sidebar */}
       <div
@@ -225,7 +227,7 @@ export function ChatWorkspaceLayout({
         <Navbar
           workspaceId="my-flutter-app"
           onSave={() => console.log("Save action")}
-          onBuild={() => console.log("Build action")}
+          onBuild={() => {}}
           onTogglePreview={() => setPreviewVisible(!previewVisible)}
           previewVisible={previewVisible}
         />
@@ -283,5 +285,6 @@ export function ChatWorkspaceLayout({
         </div>
       </div>
     </div>
+    </BuildProvider>
   );
 }
