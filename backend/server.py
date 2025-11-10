@@ -2,7 +2,9 @@ from __future__ import annotations
 import asyncio, json, os, shutil, subprocess, sys
 from pathlib import Path
 from typing import Optional
-
+from fastapi import FastAPI, HTTPException
+# from gemini_config import get_llm
+from ai_agents.coordinator import CoordinatorAgent
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -138,3 +140,14 @@ async def build_logs(wid: str):
         yield "data: Build finished. Open preview URL.\n\n"
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+# @app.post("/api/ai/generate")
+# async def generate(payload: dict):
+#     prompt = payload.get("prompt")
+#     if not prompt:
+#         raise HTTPException(400, "Missing 'prompt'")
+
+#     llm = get_llm()
+#     coordinator = CoordinatorAgent(llm)
+#     result = await coordinator.generate_app(prompt)
+
+#     return result

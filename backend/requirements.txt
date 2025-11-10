@@ -2,3 +2,7 @@ fastapi
 uvicorn[standard]
 pydantic
 python-multipart
+langchain
+langchain-google-genai
+google-generativeai
+python-dotenv
