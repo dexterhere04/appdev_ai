@@ -1,58 +1,167 @@
+"""
+Gemini + LangChain config with built-in LangSmith tracing.
+-----------------------------------------------------------
+- Auto-selects best Gemini models for each agent role
+- Builds LangChain-native runnables
+- Enables LangSmith tracing for debugging and visualization
+"""
+
 import os
-import google.generativeai as genai
+import threading
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Configure Gemini API key
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# -------------------------------------------------------------------------
+# 🧠 Environment Validation
+# -------------------------------------------------------------------------
+API_KEY = os.getenv("GEMINI_API_KEY")
+if not API_KEY:
+    raise EnvironmentError("❌ Missing GEMINI_API_KEY in environment (.env)")
 
-# ---- PATCH: Handle unexpected fields like 'thinking' ----
-try:
-    # Works for most versions (<=0.7.x)
-    from google.generativeai import models as gen_models
-    ModelClass = getattr(gen_models, "Model", None)
-except ImportError:
-    ModelClass = None
+# LangSmith optional tracing (free tier available)
+LANGCHAIN_TRACING = os.getenv("LANGCHAIN_TRACING_V2", "true").lower() == "true"
+LANGCHAIN_API_KEY = os.getenv("LANGCHAIN_API_KEY")
+LANGCHAIN_PROJECT = os.getenv("LANGCHAIN_PROJECT", "GeminiDesignAI")
 
-if ModelClass:
-    old_init = ModelClass.__init__
-
-    def patched_init(self, **kwargs):
-        """Ignore extra unexpected fields like 'thinking'."""
-        valid_args = {k: v for k, v in kwargs.items() if k in old_init.__code__.co_varnames}
-        old_init(self, **valid_args)
-
-    ModelClass.__init__ = patched_init
+if LANGCHAIN_TRACING:
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    if LANGCHAIN_API_KEY:
+        os.environ["LANGCHAIN_API_KEY"] = LANGCHAIN_API_KEY
+    os.environ["LANGCHAIN_PROJECT"] = LANGCHAIN_PROJECT
+    print(f"🪶 LangSmith tracing enabled → project: {LANGCHAIN_PROJECT}")
 else:
-    print("⚠️ Gemini SDK changed — using fallback mode for model listing.")
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    print("⚙️ LangSmith tracing disabled.")
 
-# ---- Utility to pick best stable models ----
-def get_best_models():
-    """Auto-selects best stable models for each agent role."""
+
+# -------------------------------------------------------------------------
+# 🔮 Gemini Configuration
+# -------------------------------------------------------------------------
+import google.generativeai as genai
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+genai.configure(api_key=API_KEY)
+
+
+def _safe_list_models(timeout: float = 3.0):
+    """Fetch model list safely without blocking startup."""
+    result, err = [], [None]
+
+    def _fetch():
+        try:
+            result.extend(list(genai.list_models()))
+        except Exception as e:
+            err[0] = e
+
+    t = threading.Thread(target=_fetch, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive() or err[0]:
+        return []
+    return result
+
+
+_all_models = _safe_list_models()
+_available = [m.name for m in _all_models] if _all_models else []
+
+
+def _pick(candidates):
+    for name in candidates:
+        if name in _available:
+            return name
+    return candidates[0]
+
+
+# -------------------------------------------------------------------------
+# 🎯 Model Selection per Role
+# -------------------------------------------------------------------------
+MODELS = {
+    "planner": _pick([
+        "models/gemini-2.5-pro",
+        "models/gemini-2.5-pro-preview-06-05",
+        "models/gemini-pro-latest",
+    ]),
+    "codewriter": _pick([
+        "models/gemini-2.5-flash",
+        "models/gemini-flash-latest",
+    ]),
+    "reviewer": _pick([
+        "models/gemini-2.5-pro",
+        "models/gemini-pro-latest",
+    ]),
+    "stylist": _pick([
+        "models/gemini-2.5-flash-lite",
+        "models/gemini-flash-lite-latest",
+    ]),
+    "coordinator": _pick([
+        "models/gemini-pro-latest",
+        "models/gemini-2.5-pro",
+    ]),
+}
+
+
+# -------------------------------------------------------------------------
+# 🧩 Runnable Builder (LangChain-compatible)
+# -------------------------------------------------------------------------
+def get_model_for(role: str) -> str:
+    """Return the Gemini model name for a given agent role."""
+    return MODELS.get(role, MODELS["coordinator"])
+
+
+def get_runnable_llm(
+    role: str,
+    *,
+    temperature: float = 0.6,
+    streaming: bool = False,
+    retry: int = 1,
+    max_output_tokens: int | None = None,
+):
+    """Builds and returns a ChatGoogleGenerativeAI runnable."""
+    model_id = get_model_for(role)
+
+    llm = ChatGoogleGenerativeAI(
+        model=model_id,
+        api_key=API_KEY,
+        temperature=temperature,
+        streaming=streaming,
+    )
+
+    # Optional: add retry + max token binding
     try:
-        all_models = list(genai.list_models())
-        model_names = [m.name for m in all_models]
-    except Exception as e:
-        print(f"⚠️ Model listing failed, fallback to defaults: {e}")
-        model_names = []
+        if retry and hasattr(llm, "with_retry"):
+            llm = llm.with_retry(retries=retry)
+    except Exception:
+        pass
 
-    def pick(candidates):
-        for name in candidates:
-            if name in model_names:
-                return name
-        return candidates[0]  # fallback
+    try:
+        if max_output_tokens and hasattr(llm, "bind"):
+            llm = llm.bind({"max_output_tokens": max_output_tokens})
+    except Exception:
+        pass
 
-    return {
-        "planner": pick(["models/gemini-2.5-pro", "models/gemini-pro-latest"]),
-        "codewriter": pick(["models/gemini-2.5-flash", "models/gemini-flash-latest"]),
-        "reviewer": pick(["models/gemini-2.5-pro", "models/gemini-pro-latest"]),
-        "stylist": pick(["models/gemini-2.5-flash-lite", "models/gemini-flash-lite-latest"]),
-        "coordinator": pick(["models/gemini-pro-latest"]),
-    }
+    return llm
 
-MODELS = get_best_models()
 
-print("\n✅ Gemini Models Configured:")
-for role, name in MODELS.items():
-    print(f"  {role:12} →  {name}")
+# -------------------------------------------------------------------------
+# 🚀 Prebuilt Runnables for All Roles
+# -------------------------------------------------------------------------
+prebuilt_runnables = {}
+for role in MODELS.keys():
+    try:
+        prebuilt_runnables[role] = get_runnable_llm(
+            role, temperature=0.5, streaming=False, retry=1
+        )
+    except Exception:
+        prebuilt_runnables[role] = None
+
+
+# -------------------------------------------------------------------------
+# 🧾 Startup Summary
+# -------------------------------------------------------------------------
+if __name__ == "__main__":
+    print("\n✅ Gemini Models Configured:")
+    for role, name in MODELS.items():
+        print(f"  {role:12} → {name}")
+    ok = sum(v is not None for v in prebuilt_runnables.values())
+    print(f"Prebuilt runnables: {ok}/{len(prebuilt_runnables)} ready.")

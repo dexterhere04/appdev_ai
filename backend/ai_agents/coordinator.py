@@ -1,31 +1,37 @@
-# backend/ai_agents/coordinator.py
-from ai_agents.planner import PlannerAgent
-from ai_agents.codewriter import CodeWriterAgent
-from ai_agents.reviewer import ReviewerAgent
+import json
+from ai_agents.creative_director import CreativeDirectorAgent
+from ai_agents.ux_architect import UXArchitectAgent
+from ai_agents.ui_designer import UIDesignerAgent
+from ai_agents.critic import CriticAgent
+from ai_agents.codewriter import CodewriterAgent
 from ai_agents.stylist import StylistAgent
 
 class CoordinatorAgent:
-    def __init__(self, llm):
-        self.llm = llm
-        self.planner = PlannerAgent(llm)
-        self.codewriter = CodeWriterAgent(llm)
-        self.reviewer = ReviewerAgent(llm)
-        self.stylist = StylistAgent(llm)
+    def __init__(self):
+        self.director = CreativeDirectorAgent()
+        self.architect = UXArchitectAgent()
+        self.ui_designer = UIDesignerAgent()
+        self.critic = CriticAgent()
+        self.codewriter = CodewriterAgent()
+        self.stylist = StylistAgent()
 
-    async def generate_app(self, prompt: str):
-        # 1️⃣ Plan
-        plan = await self.planner.create_plan(prompt)
+    async def generate_design(self, user_prompt: str):
+        vision = await self.director.create_vision(user_prompt)
+        ux = await self.architect.design_structure(vision)
+        ui = await self.ui_designer.design_ui(ux)
+        critique = await self.critic.review_design(ui)
 
-        # 2️⃣ Generate initial code
-        files = await self.codewriter.generate_code(plan)
+        # if critique finds major issues, loop back once
+        if "issues" in critique.lower():
+            ui = await self.ui_designer.design_ui(f"{ux}\n\nFeedback:\n{critique}")
 
-        # 3️⃣ Review and fix issues
-        reviewed_files = await self.reviewer.review_code(files)
+        code = await self.codewriter.generate_code(ux)
+        styled = await self.stylist.apply_style(code)
 
-        # 4️⃣ Apply stylistic improvements
-        final_files = await self.stylist.apply_style(reviewed_files)
-
-        return {
-            "plan": plan,
-            "files": final_files,
-        }
+        return json.dumps({
+            "vision": vision,
+            "ux": ux,
+            "ui": ui,
+            "critique": critique,
+            "final_code": styled
+        }, indent=2)

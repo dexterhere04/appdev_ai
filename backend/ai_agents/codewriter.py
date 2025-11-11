@@ -1,23 +1,21 @@
-# backend/ai_agents/codewriter.py
 from ai_agents.base import BaseAgent
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableSequence
+from langchain_core.output_parsers import StrOutputParser
 
-class CodeWriterAgent(BaseAgent):
-    """Agent that generates Dart/Flutter code for each planned component."""
-
+class CodewriterAgent(BaseAgent):
     def __init__(self):
-        super().__init__(role="codewriter", temperature=0.7)
+        super().__init__("codewriter", temperature=0.5)
 
-    async def write_code(self, component_description: str, filename: str | None = None) -> str:
-        prompt = f"""
-        You are a senior Flutter developer.
-        Write clean, production-quality Dart/Flutter code for the following component:
+    async def generate_code(self, ux_plan: str):
+        prompt = ChatPromptTemplate.from_template("""
+        You are a Flutter developer.
+        Based on the UX plan, generate boilerplate Dart files for each screen.
 
-        {component_description}
+        UX plan:
+        {ux_plan}
 
-        - Follow Flutter best practices.
-        - Use descriptive variable names.
-        - Follow Material 3 design conventions.
-        - Avoid redundant comments.
-        {"The file name will be " + filename if filename else ""}
-        """
-        return await self.run(prompt)
+        Return JSON list: [{{"file": "screen.dart", "content": "<dart code>"}}]
+        """)
+        chain = RunnableSequence(prompt | self.llm | StrOutputParser())
+        return await chain.ainvoke({"ux_plan": ux_plan})

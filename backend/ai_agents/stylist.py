@@ -1,24 +1,21 @@
-# backend/ai_agents/stylist.py
-import asyncio
+from ai_agents.base import BaseAgent
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableSequence
+from langchain_core.output_parsers import StrOutputParser
 
-class StylistAgent:
-    def __init__(self, llm):
-        self.llm = llm
+class StylistAgent(BaseAgent):
+    def __init__(self):
+        super().__init__("stylist", temperature=0.4)
 
-    async def _style_file(self, file_obj: dict):
-        """Applies stylistic improvements to code (consistent formatting, naming)."""
-        system = """
-You are a Dart formatter and code style expert.
-Improve readability and consistency of the given Dart file.
-Use Material 3 conventions and good naming.
-Return only the styled Dart code — no markdown or text.
-        """
+    async def apply_style(self, files_json: str):
+        prompt = ChatPromptTemplate.from_template("""
+        You are a Flutter code stylist.
+        Apply consistent formatting, typography, and Material 3 color theming.
 
-        prompt = f"{system}\n\nFile path: {file_obj['path']}\nCode:\n{file_obj['content']}"
+        Input files (JSON):
+        {files_json}
 
-        response = await self.llm.ainvoke(prompt)
-        return {"path": file_obj["path"], "content": response.content.strip()}
-
-    async def apply_style(self, files: list[dict]):
-        """Apply style fixes concurrently to all files."""
-        return await asyncio.gather(*[self._style_file(f) for f in files])
+        Return the updated JSON with styled code content only.
+        """)
+        chain = RunnableSequence(prompt | self.llm | StrOutputParser())
+        return await chain.ainvoke({"files_json": files_json})
