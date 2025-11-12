@@ -9,8 +9,8 @@ async def main():
 
     # ---- USER INPUT ----
     user_prompt = (
-        "A productivity app that combines a daily task list "
-        "with motivational quotes and progress tracking using Flutter."
+        "A App focused on availing tutions students can select a teacher and see all their videos on a course"
+        "It should be intuitive and easy to use and have navigation and basic functionality"
     )
 
     print("🎬 Starting design workflow for prompt:")
