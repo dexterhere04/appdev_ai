@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useBuild } from "@/context/BuildContext"; // ✅ Import global build state
 
 const DEVICES = {
   "iPhone 14": { width: 430 / 2, height: 932 / 2 },
@@ -10,40 +9,22 @@ const DEVICES = {
   "Desktop": { width: 1280 / 2, height: 800 / 2 },
 };
 
+const REMOTE_PREVIEW_URL = "http://13.235.89.215:3000";
+
 export function PreviewPane() {
-  const { workspaceId, isBuilding, logs, error } = useBuild(); // ✅ Use context
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [device, setDevice] = useState<keyof typeof DEVICES>("iPhone 14");
 
-  // ✅ Automatically refresh preview when build completes
+  // ✅ Set preview URL to remote server
   useEffect(() => {
-    if (!workspaceId) return;
-    if (!isBuilding) {
-      setPreviewUrl(
-        `http://localhost:8000/preview/${workspaceId}/build/web/index.html?t=${Date.now()}`
-      );
-    }
-  }, [workspaceId, isBuilding]);
+    setPreviewUrl(REMOTE_PREVIEW_URL);
+  }, []);
 
   const { width, height } = DEVICES[device];
   const aspectRatio = width / height;
 
-  // 🏗️ Build progress screen
-  if (isBuilding) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full w-full text-gray-300 px-6 bg-[#0a0a0a]">
-        <p className="text-sm font-medium mb-3">Building Flutter app...</p>
-        <div className="w-full max-h-[70%] overflow-y-auto text-xs font-mono bg-black/40 border border-gray-700 rounded-lg p-3 text-gray-200 whitespace-pre-wrap">
-          {logs.map((line, i) => (
-            <div key={i}>{line}</div>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
   // 🖼️ Live responsive preview
-  if (previewUrl && !error) {
+  if (previewUrl) {
     return (
       <div className="relative flex flex-col items-center justify-center h-full w-full bg-[#0a0a0a] overflow-hidden">
         {/* Device selector */}
@@ -94,12 +75,10 @@ export function PreviewPane() {
     );
   }
 
-  // ⚠️ Build error or missing preview
+  // ⚠️ No preview available
   return (
     <div className="flex flex-col items-center justify-center h-full w-full bg-[#0a0a0a] text-gray-400">
-      <p className="text-sm">
-        ⚠️ {error ? "Build failed or preview unavailable." : "No preview yet."}
-      </p>
+      <p className="text-sm">⚠️ No preview available.</p>
     </div>
   );
 }

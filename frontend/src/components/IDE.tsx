@@ -6,58 +6,86 @@ import { FileExplorerItem } from "@/components/FileExplorer";
 import { MonacoEditor } from "@/components/CodeEditor";
 import { X, PanelLeftClose, PanelLeft, File } from "lucide-react";
 
+const API_BASE = "http://13.235.89.215:5051";
+
 export default function IDE() {
-  const [workspaceId, setWorkspaceId] = useState<string>("");
   const [tree, setTree] = useState<FileNode[]>([]);
   const [openFiles, setOpenFiles] = useState<FileNode[]>([]);
   const [activeFile, setActiveFile] = useState<FileNode | null>(null);
   const [fileContents, setFileContents] = useState<Record<string, string>>({});
   const [explorerCollapsed, setExplorerCollapsed] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  /** ✅ Create or reuse workspace on mount */
-  useEffect(() => {
-    const saved = sessionStorage.getItem("workspaceId");
-    if (saved) {
-      setWorkspaceId(saved);
-      return;
-    }
+  // Build hierarchical tree from flat file list
+  const buildTree = (flatFiles: Array<{ path: string; type: string }>): FileNode[] => {
+    const root: any = { children: {} };
 
-    const createWorkspace = async () => {
-      try {
-        const res = await fetch("http://localhost:8000/api/workspaces", {
-          method: "POST",
-        });
-        const data = await res.json();
-        setWorkspaceId(data.workspaceId);
-        sessionStorage.setItem("workspaceId", data.workspaceId);
-      } catch (err) {
-        console.error("Failed to create workspace:", err);
-      }
+    flatFiles.forEach((file) => {
+      const parts = file.path.split("/");
+      let current = root;
+
+      parts.forEach((part, idx) => {
+        const isLastPart = idx === parts.length - 1;
+        const currentPath = parts.slice(0, idx + 1).join("/");
+
+        if (!current.children[part]) {
+          current.children[part] = {
+            name: part,
+            path: currentPath,
+            type: isLastPart ? file.type : "folder",
+            children: {},
+          };
+        }
+
+        current = current.children[part];
+      });
+    });
+
+    // Convert nested object structure to array structure
+    const convertToArray = (obj: any): FileNode[] => {
+      const items = Object.values(obj) as any[];
+      return items.map((item) => ({
+        name: item.name,
+        path: item.path,
+        type: item.type,
+        children: item.children && Object.keys(item.children).length > 0
+          ? convertToArray(item.children)
+          : undefined,
+      })).sort((a, b) => {
+        // Sort: folders first, then files, alphabetically within each group
+        if (a.type === b.type) {
+          return a.name.localeCompare(b.name);
+        }
+        return a.type === "folder" ? -1 : 1;
+      });
     };
 
-    createWorkspace();
-  }, []);
+    return convertToArray(root.children);
+  };
 
-  /** ✅ Load file tree */
+  // Load file tree on mount
   useEffect(() => {
-    if (!workspaceId) return;
-
     const loadTree = async () => {
       try {
-        const res = await fetch(`http://localhost:8000/api/workspaces/${workspaceId}`);
+        setLoading(true);
+        const res = await fetch(`${API_BASE}/api/tree`);
+        if (!res.ok) throw new Error("Failed to load file tree");
         const data = await res.json();
-        setTree(data.files || []);
+        const treeData = buildTree(data.files || []);
+        setTree(treeData);
       } catch (err) {
-        console.error("Failed to fetch workspace tree:", err);
+        console.error("Failed to fetch file tree:", err);
+      } finally {
+        setLoading(false);
       }
     };
 
     loadTree();
-  }, [workspaceId]);
+  }, []);
 
-  /** ✅ Load a file’s content */
+  // Load a file's content
   const loadFile = async (file: FileNode) => {
-    if (!workspaceId || file.type !== "file") return;
+    if (file.type !== "file") return;
 
     // Add to open files if not already open
     if (!openFiles.some((f) => f.path === file.path)) {
@@ -65,61 +93,35 @@ export default function IDE() {
     }
     setActiveFile(file);
 
+    // Return if already loaded
+    if (fileContents[file.path] !== undefined) return;
+
     try {
       const res = await fetch(
-        `http://localhost:8000/api/workspaces/${workspaceId}/file?path=${encodeURIComponent(file.path)}`
+        `${API_BASE}/api/file?path=${encodeURIComponent(file.path)}`
       );
+      if (!res.ok) throw new Error("Failed to load file");
       const data = await res.json();
       setFileContents((prev) => ({ ...prev, [file.path]: data.content }));
     } catch (err) {
       console.error("Failed to load file:", err);
+      setFileContents((prev) => ({
+        ...prev,
+        [file.path]: `// Error loading file: ${
+          err instanceof Error ? err.message : "Unknown error"
+        }`,
+      }));
     }
   };
 
-  const saveFile = async (latestValue?: string) => {
-    if (!workspaceId || !activeFile) return;
-
-    const contentToSave =
-      latestValue ?? fileContents[activeFile.path] ?? "";
-
-    // 🧠 Log the content that will be saved
-    console.log(`💾 Saving file: ${activeFile.path}`);
-    console.log("📄 File content being sent:\n--------------------------\n");
-    console.log(contentToSave+'helo');
-    console.log("\n--------------------------\n");
-
-    try {
-      const response = await fetch(
-        `http://localhost:8000/api/workspaces/${workspaceId}/file`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            path: activeFile.path,
-            content: contentToSave,
-          }),
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`Server responded with ${response.status}`);
-      }
-
-      console.log(`✅ Saved successfully: ${activeFile.path}`);
-    } catch (err) {
-      console.error("❌ Save failed:", err);
-    }
-  };
-
-
-  /** ✅ Handle Monaco code changes */
+  // Handle Monaco code changes
   const handleCodeChange = (value: string) => {
     if (activeFile) {
       setFileContents((prev) => ({ ...prev, [activeFile.path]: value }));
     }
   };
 
-  /** ✅ Close open tab */
+  // Close open tab
   const handleCloseFile = (file: FileNode, e: React.MouseEvent) => {
     e.stopPropagation();
     const remaining = openFiles.filter((f) => f.path !== file.path);
@@ -131,7 +133,7 @@ export default function IDE() {
 
   return (
     <div className="flex h-full min-h-0 bg-[#1e1e1e] text-gray-200 overflow-hidden">
-      {/* ✅ File Explorer */}
+      {/* File Explorer */}
       <div
         className={`bg-[#252526] border-r border-[#3e3e42] flex flex-col min-h-0 transition-all duration-300 ${
           explorerCollapsed ? "w-0 overflow-hidden" : "w-64"
@@ -151,10 +153,14 @@ export default function IDE() {
 
         {/* Scrollable File Tree */}
         <div className="flex-1 overflow-y-auto min-h-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-          {tree.length > 0 ? (
+          {loading ? (
+            <div className="text-gray-500 text-sm p-3 italic">
+              Loading project files...
+            </div>
+          ) : tree.length > 0 ? (
             tree.map((node, index) => (
               <FileExplorerItem
-                key={`${workspaceId}-${node.path}-${index}`}
+                key={`${node.path}-${index}`}
                 node={node}
                 level={0}
                 onSelect={loadFile}
@@ -162,13 +168,13 @@ export default function IDE() {
             ))
           ) : (
             <div className="text-gray-500 text-sm p-3 italic">
-              Loading project files...
+              No files found
             </div>
           )}
         </div>
       </div>
 
-      {/* ✅ Editor Pane */}
+      {/* Editor Pane */}
       <div className="flex flex-col flex-1 min-h-0">
         {/* File Tabs */}
         <div className="flex bg-[#252526] border-b border-[#3e3e42] overflow-x-auto min-h-[2.5rem]">
@@ -187,7 +193,7 @@ export default function IDE() {
           ) : (
             openFiles.map((file, index) => (
               <div
-                key={`${workspaceId}-${file.path}-${index}`}
+                key={`${file.path}-${index}`}
                 className={`flex items-center gap-2 px-4 py-2 cursor-pointer border-r transition-colors ${
                   activeFile?.path === file.path
                     ? "bg-[#1e1e1e] text-white"
@@ -215,7 +221,6 @@ export default function IDE() {
               file={activeFile}
               value={fileContents[activeFile.path] ?? ""}
               onChange={handleCodeChange}
-              onSave={(latestValue) => saveFile(latestValue)} // ✅ pass current editor value
             />
           ) : (
             <div className="flex items-center justify-center h-full text-gray-500">
