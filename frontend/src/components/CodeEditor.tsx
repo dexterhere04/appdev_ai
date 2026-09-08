@@ -38,7 +38,7 @@ export function MonacoEditor({ file, value, onChange, onSave }: MonacoEditorProp
   return (
     <Editor
       height="100%"
-      defaultLanguage="plaintext"
+      path={file?.path ?? ""}
       language={lang}
       value={value}
       theme="vs-dark"

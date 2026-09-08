@@ -1,9 +1,25 @@
-import { Save, Play, Eye, EyeOff, Settings, Share2 } from "lucide-react";
+import { Save, Play, Eye, EyeOff, Settings, Share2, RefreshCw } from "lucide-react";
 import { useBuild } from "@/context/BuildContext";
 
 export function Navbar() {
-  const { workspaceId, previewVisible, requestSave, triggerBuild, togglePreview } =
-    useBuild();
+  const {
+    workspaceId,
+    previewVisible,
+    requestSave,
+    triggerBuild,
+    togglePreview,
+    devMode,
+    devUrl,
+    isBuilding,
+  } = useBuild();
+
+  const buildLabel = !devMode
+    ? "Build"
+    : devUrl
+    ? "Reload"
+    : isBuilding
+    ? "Starting..."
+    : "Run";
 
   return (
     <div className="h-14 bg-[#0d0d0d] border-b border-gray-800 flex items-center justify-between px-4">
@@ -29,10 +45,11 @@ export function Navbar() {
 
         <button
           onClick={triggerBuild}
-          className="flex items-center gap-2 px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 rounded-md transition-colors font-medium"
+          disabled={devMode && isBuilding && !devUrl}
+          className="flex items-center gap-2 px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-60 rounded-md transition-colors font-medium"
         >
-          <Play size={16} />
-          Build
+          {devMode && devUrl ? <RefreshCw size={16} /> : <Play size={16} />}
+          {buildLabel}
         </button>
 
         <button

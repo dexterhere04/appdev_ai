@@ -4,6 +4,8 @@ services:
     image: flutter-cloud-builder-backend:latest
     ports:
       - "5000:5000"
+      # Dev-mode flutter run -d web-server hot-reload sessions (per workspace).
+      - "8100-8131:8100-8131"
     environment:
       # Optional: enable the AI pipeline (read from shell or a root .env file).
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
@@ -29,7 +31,8 @@ services:
       target: dev
     image: flutter-cloud-builder-frontend-dev:latest
     ports:
-      - "3000:3000"
+      # Host port is configurable (3000 is taken on some machines):
+      - "${FRONTEND_PORT:-3000}:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:5000
     volumes:
