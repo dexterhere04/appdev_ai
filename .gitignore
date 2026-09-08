@@ -1,5 +1,6 @@
 backend/workspaces
 backend/.env
+.env
 __pycache__/
 *.pyc
 .vscode/
