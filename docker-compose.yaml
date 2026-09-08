@@ -1,20 +1,59 @@
-version: "3.9"
 services:
+  backend:
+    build: ./backend
+    image: flutter-cloud-builder-backend:latest
+    ports:
+      - "5000:5000"
+    environment:
+      # Optional: enable the AI pipeline (read from shell or a root .env file).
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+      - ./backend:/app
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:5000/healthz", timeout=5)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # Dev frontend: hot reload with bind mount. docker compose --profile dev up
   frontend:
-    build: ./frontend
+    profiles: ["dev"]
+    build:
+      context: ./frontend
+      target: dev
+    image: flutter-cloud-builder-frontend-dev:latest
     ports:
       - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:5000
     volumes:
       - ./frontend:/app
       - /app/node_modules
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:5000
-    command: npm run dev
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
 
-  backend:
-    build: ./backend
+  # Production frontend: standalone Next.js build on a slim runtime.
+  # docker compose --profile prod up
+  frontend-prod:
+    profiles: ["prod"]
+    build:
+      context: ./frontend
+      target: prod
+      args:
+        # NEXT_PUBLIC_* is inlined at build time in next build.
+        NEXT_PUBLIC_API_URL: http://localhost:5000
+    image: flutter-cloud-builder-frontend-prod:latest
     ports:
-      - "5000:5000"
-    volumes:
-      - ./backend:/app
-    command: uvicorn server:app --host 0.0.0.0 --port 5000
+      - "3001:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
