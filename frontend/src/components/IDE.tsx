@@ -1,78 +1,49 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { FileNode } from "@/types/file";
 import { FileExplorerItem } from "@/components/FileExplorer";
 import { MonacoEditor } from "@/components/CodeEditor";
+import { useBuild } from "@/context/BuildContext";
+import { API_BASE } from "@/lib/api";
 import { X, PanelLeftClose, PanelLeft, File } from "lucide-react";
 
-const API_BASE = "http://13.235.89.215:5051";
-
 export default function IDE() {
+  const { workspaceId, saveSignal } = useBuild();
+
   const [tree, setTree] = useState<FileNode[]>([]);
   const [openFiles, setOpenFiles] = useState<FileNode[]>([]);
   const [activeFile, setActiveFile] = useState<FileNode | null>(null);
   const [fileContents, setFileContents] = useState<Record<string, string>>({});
   const [explorerCollapsed, setExplorerCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [saveState, setSaveState] = useState<
+    "idle" | "saving" | "saved" | "error"
+  >("idle");
 
-  // Build hierarchical tree from flat file list
-  const buildTree = (flatFiles: Array<{ path: string; type: string }>): FileNode[] => {
-    const root: any = { children: {} };
+  const activeFileRef = useRef<FileNode | null>(null);
+  const fileContentsRef = useRef<Record<string, string>>({});
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    flatFiles.forEach((file) => {
-      const parts = file.path.split("/");
-      let current = root;
-
-      parts.forEach((part, idx) => {
-        const isLastPart = idx === parts.length - 1;
-        const currentPath = parts.slice(0, idx + 1).join("/");
-
-        if (!current.children[part]) {
-          current.children[part] = {
-            name: part,
-            path: currentPath,
-            type: isLastPart ? file.type : "folder",
-            children: {},
-          };
-        }
-
-        current = current.children[part];
-      });
-    });
-
-    // Convert nested object structure to array structure
-    const convertToArray = (obj: any): FileNode[] => {
-      const items = Object.values(obj) as any[];
-      return items.map((item) => ({
-        name: item.name,
-        path: item.path,
-        type: item.type,
-        children: item.children && Object.keys(item.children).length > 0
-          ? convertToArray(item.children)
-          : undefined,
-      })).sort((a, b) => {
-        // Sort: folders first, then files, alphabetically within each group
-        if (a.type === b.type) {
-          return a.name.localeCompare(b.name);
-        }
-        return a.type === "folder" ? -1 : 1;
-      });
-    };
-
-    return convertToArray(root.children);
-  };
-
-  // Load file tree on mount
   useEffect(() => {
+    activeFileRef.current = activeFile;
+  }, [activeFile]);
+
+  useEffect(() => {
+    fileContentsRef.current = fileContents;
+  }, [fileContents]);
+
+  // Load file tree on mount / workspace change
+  useEffect(() => {
+    if (!workspaceId) return;
+
     const loadTree = async () => {
       try {
         setLoading(true);
-        const res = await fetch(`${API_BASE}/api/tree`);
+        const res = await fetch(`${API_BASE}/api/workspaces/${workspaceId}`);
         if (!res.ok) throw new Error("Failed to load file tree");
         const data = await res.json();
-        const treeData = buildTree(data.files || []);
-        setTree(treeData);
+        setTree(data.files ?? []);
       } catch (err) {
         console.error("Failed to fetch file tree:", err);
       } finally {
@@ -81,24 +52,50 @@ export default function IDE() {
     };
 
     loadTree();
-  }, []);
+  }, [workspaceId]);
+
+  // Save the active file
+  const saveActiveFile = useCallback(async () => {
+    const file = activeFileRef.current;
+    if (!file || !workspaceId) return;
+
+    const content = fileContentsRef.current[file.path];
+    if (content === undefined) return;
+
+    setSaveState("saving");
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/workspaces/${workspaceId}/file`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: file.path, content }),
+        }
+      );
+      if (!res.ok) throw new Error(`Save failed (${res.status})`);
+      setSaveState("saved");
+    } catch (err) {
+      console.error("Failed to save file:", err);
+      setSaveState("error");
+    }
+  }, [workspaceId]);
 
   // Load a file's content
   const loadFile = async (file: FileNode) => {
     if (file.type !== "file") return;
 
-    // Add to open files if not already open
     if (!openFiles.some((f) => f.path === file.path)) {
       setOpenFiles((prev) => [...prev, file]);
     }
     setActiveFile(file);
 
-    // Return if already loaded
     if (fileContents[file.path] !== undefined) return;
 
     try {
       const res = await fetch(
-        `${API_BASE}/api/file?path=${encodeURIComponent(file.path)}`
+        `${API_BASE}/api/workspaces/${workspaceId}/file?path=${encodeURIComponent(
+          file.path
+        )}`
       );
       if (!res.ok) throw new Error("Failed to load file");
       const data = await res.json();
@@ -114,12 +111,30 @@ export default function IDE() {
     }
   };
 
-  // Handle Monaco code changes
+  // Handle Monaco code changes (debounced autosave)
   const handleCodeChange = (value: string) => {
     if (activeFile) {
       setFileContents((prev) => ({ ...prev, [activeFile.path]: value }));
     }
+
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      saveActiveFile();
+    }, 1500);
   };
+
+  // Wire Navbar save signal
+  useEffect(() => {
+    if (saveSignal > 0) {
+      saveActiveFile();
+    }
+  }, [saveSignal, saveActiveFile]);
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 
   // Close open tab
   const handleCloseFile = (file: FileNode, e: React.MouseEvent) => {
@@ -158,9 +173,9 @@ export default function IDE() {
               Loading project files...
             </div>
           ) : tree.length > 0 ? (
-            tree.map((node, index) => (
+            tree.map((node) => (
               <FileExplorerItem
-                key={`${node.path}-${index}`}
+                key={node.path || node.id}
                 node={node}
                 level={0}
                 onSelect={loadFile}
@@ -191,9 +206,9 @@ export default function IDE() {
           {openFiles.length === 0 ? (
             <div className="px-4 py-2 text-xs text-gray-500">No files open</div>
           ) : (
-            openFiles.map((file, index) => (
+            openFiles.map((file) => (
               <div
-                key={`${file.path}-${index}`}
+                key={file.path || file.id}
                 className={`flex items-center gap-2 px-4 py-2 cursor-pointer border-r transition-colors ${
                   activeFile?.path === file.path
                     ? "bg-[#1e1e1e] text-white"
@@ -214,6 +229,25 @@ export default function IDE() {
           )}
         </div>
 
+        {/* Save status indicator */}
+        {saveState !== "idle" && (
+          <div
+            className={`text-xs px-4 py-1 border-b border-[#3e3e42] ${
+              saveState === "error"
+                ? "text-red-400"
+                : saveState === "saving"
+                ? "text-gray-400"
+                : "text-emerald-400"
+            }`}
+          >
+            {saveState === "saving"
+              ? "Saving..."
+              : saveState === "saved"
+              ? "All changes saved"
+              : "Save failed"}
+          </div>
+        )}
+
         {/* Monaco Editor */}
         <div className="flex-1 overflow-hidden min-h-0">
           {activeFile ? (
@@ -221,6 +255,7 @@ export default function IDE() {
               file={activeFile}
               value={fileContents[activeFile.path] ?? ""}
               onChange={handleCodeChange}
+              onSave={saveActiveFile}
             />
           ) : (
             <div className="flex items-center justify-center h-full text-gray-500">

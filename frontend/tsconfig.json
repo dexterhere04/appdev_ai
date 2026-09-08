@@ -21,8 +21,7 @@
     "types": [
       "node",
       "@types/react",
-      "@types/react-dom",
-      "@monaco-editor/react"
+      "@types/react-dom"
     ],
     "plugins": [
       {

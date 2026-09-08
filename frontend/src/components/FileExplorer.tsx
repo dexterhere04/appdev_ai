@@ -48,7 +48,7 @@ export function FileExplorerItem({
         <div>
           {node.children.map((child) => (
             <FileExplorerItem
-              key={`${node.id}-${child.id}`} // ✅ guaranteed unique
+              key={child.path || child.id}
               node={child}
               level={level + 1}
               onSelect={onSelect}

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useBuild } from "@/context/BuildContext";
 
 const DEVICES = {
   "iPhone 14": { width: 430 / 2, height: 932 / 2 },
@@ -9,21 +10,13 @@ const DEVICES = {
   "Desktop": { width: 1280 / 2, height: 800 / 2 },
 };
 
-const REMOTE_PREVIEW_URL = "http://13.235.89.215:3000";
-
 export function PreviewPane() {
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const { previewUrl } = useBuild();
   const [device, setDevice] = useState<keyof typeof DEVICES>("iPhone 14");
-
-  // ✅ Set preview URL to remote server
-  useEffect(() => {
-    setPreviewUrl(REMOTE_PREVIEW_URL);
-  }, []);
 
   const { width, height } = DEVICES[device];
   const aspectRatio = width / height;
 
-  // 🖼️ Live responsive preview
   if (previewUrl) {
     return (
       <div className="relative flex flex-col items-center justify-center h-full w-full bg-[#0a0a0a] overflow-hidden">
@@ -63,7 +56,7 @@ export function PreviewPane() {
               transform: "scale(0.5)",
               transformOrigin: "top left",
             }}
-            sandbox="allow-scripts allow-same-origin allow-popups"
+            sandbox="allow-scripts"
           />
         </div>
 
@@ -75,10 +68,9 @@ export function PreviewPane() {
     );
   }
 
-  // ⚠️ No preview available
   return (
     <div className="flex flex-col items-center justify-center h-full w-full bg-[#0a0a0a] text-gray-400">
-      <p className="text-sm">⚠️ No preview available.</p>
+      <p className="text-sm">No preview available — build the project</p>
     </div>
   );
 }
