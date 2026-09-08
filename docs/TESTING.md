@@ -36,9 +36,11 @@ Server run with `uvicorn server:app` (port 5057) and exercised over HTTP:
 
 - `react-arborist` (and its exclusive transitive deps: `react-dnd`,
   `react-window`, `redux`, `dnd-core`, `@react-dnd/*`, `memoize-one`,
-  `use-sync-external-store`, `hoist-non-react-statics`) and
-  `babel-plugin-react-compiler` removed from `package.json` and synced into
-  `package-lock.json` (root specifiers match; no dangling references remain).
+  `use-sync-external-store`, `hoist-non-react-statics`) was removed from
+  `package.json` and synced into `package-lock.json`.
+- `babel-plugin-react-compiler` was restored: Next.js 16 enables the React
+  Compiler and resolves this package during `next build`, so a clean
+  `npm ci` fails without it (see Docker test run below).
 - Note: this sandbox blocks npm registry fetches (`EALLOWREMOTE`), so the lock
   was synced by hand and validated with `JSON.parse` rather than `npm install`.
 
@@ -50,12 +52,35 @@ Server run with `uvicorn server:app` (port 5057) and exercised over HTTP:
 
 ## Not exercised
 
-- A full `flutter build web` round trip was **not** re-run against the live SSE
-  endpoint in this pass (slow, ~30–60s) — the previous review confirmed a green
-  build path, and the SSE pipeline changes (single `__EXIT__`, per-workspace
-  lock, stop-on-`pub get`-failure) were verified by code inspection.
-- `docker compose build` / the new Flutter-inclusive backend image were not built
-  here (no Docker in this sandbox).
+- The multi-agent AI pipeline itself (with a real `GEMINI_API_KEY`) was not run;
+  only its graceful 503 degradation was verified.
+
+## Docker container test run (2026-09-08)
+
+Optimization pass after the issue fixes. Images built and exercised with
+Docker 29.7.2 / Compose 5.4.0.
+
+| Check | Result |
+| ----- | ------ |
+| `docker compose config` | ✅ valid |
+| Backend image build (pinned `flutter:3.41.5`, venv, pinned deps) | ✅ `flutter-cloud-builder-backend` 7.37 GB |
+| Frontend `dev` image build | ✅ 2.46 GB |
+| Frontend `prod` image build (Next standalone) | ✅ **446 MB** (~5x smaller than dev) |
+| Build context size (with `.dockerignore`) | ✅ backend sent 10.8 kB (was ~500 kB+) |
+| `--profile dev up` | ✅ backend healthy (`/healthz` 200) |
+| Create workspace in-container (`flutter create`) | ✅ `a0dd612b` |
+| Tree, file read/write roundtrip | ✅ |
+| `/preview` traversal | ✅ 404 |
+| `flutter build web` via SSE in-container | ✅ `data: __EXIT__ 0`, "Build finished" |
+| Preview `index.html` `<base href>` + assets | ✅ |
+| `POST /api/ai/generate` (deps present, no key) | ✅ 503 |
+| Frontend prod serves page; API base baked into client bundle | ✅ 200 |
+| Image leak check (`/app` contents) | ✅ no `workspaces/`, `.env`, `__pycache__` |
+| Image tooling | ✅ Python 3.12.3 venv, uvicorn 0.52.4, Flutter 3.41.5 |
+
+Notes: Ubuntu's python3 is PEP-668 managed, so deps install into `/opt/venv`.
+Next.js 16 enables the React Compiler by default, so `babel-plugin-react-compiler`
+is required in the lockfile for clean `npm ci` + `next build` (it is not "dead").
 
 ## Bottom line
 

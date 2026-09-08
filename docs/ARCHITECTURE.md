@@ -144,9 +144,20 @@ what the components and the backend tree use.
 
 ## Docker (`docker-compose.yaml`)
 
-- `frontend`: `node:20-bullseye`, `npm run dev`, port 3000, bind-mounted
-  `./frontend`, `NEXT_PUBLIC_API_URL=http://localhost:5000`.
-- `backend`: `ghcr.io/cirruslabs/flutter:stable` (Flutter + Dart on `PATH`) with
-  python3/pip installed, `CMD ["uvicorn", "server:app", "--host", "0.0.0.0",
-  "--port", "5000"]`, port 5000, bind-mounted `./backend`.
-- The obsolete top-level `version:` key could be dropped (harmless).
+The `backend` service runs always; two profiles select the frontend variant.
+
+- `backend`: `ghcr.io/cirruslabs/flutter:3.41.5` (Flutter 3.41.5 + Dart on `PATH`),
+  a dedicated `/opt/venv` (Ubuntu python3 is PEP-668 managed), pinned
+  `requirements.txt`, `CMD ["uvicorn", "server:app", "--host", "0.0.0.0",
+  "--port", "5000"]`, port 5000, bind-mounted `./backend`, `healthcheck` on
+  `GET /healthz`, `restart: unless-stopped`. `GEMINI_API_KEY` is passed from the
+  environment (never baked into the image).
+- `frontend` (profile `dev`): hot reload. Multi-stage `node:20-bullseye` build,
+  target `dev` (`npm run dev`), `./frontend` bind-mounted with an anonymous
+  `/app/node_modules` volume, port 3000.
+- `frontend-prod` (profile `prod`): production. Multi-stage build, target `prod`
+  = Next.js **standalone** output (`output: "standalone"`) copied onto
+  `node:20-bullseye-slim`, run as `node` user via `node server.js`, port 3001.
+  `NEXT_PUBLIC_API_URL` is passed as a **build arg** (inlined at `next build`).
+- `.dockerignore` files keep build contexts tiny (no `node_modules`, `.next`,
+  `workspaces/`, `__pycache__/`, `.env`, caches) and prevent baking secrets.

@@ -2,6 +2,14 @@
 
 Base URL (local): `http://localhost:5000`
 
+### `GET /healthz`
+Liveness probe used by the container healthcheck.
+
+**Response 200**
+```json
+{ "status": "ok" }
+```
+
 `wid` (workspace id) is a lowercase 8-hex string (`^[a-f0-9]{8}$`, e.g. `5a5482c0`).
 All endpoints validate it and return **400** for a malformed id and **404** when the
 workspace does not exist.

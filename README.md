@@ -176,13 +176,33 @@ message rather than crashing.
 
 ## 5. Running
 
-### Option A — Docker Compose (both services)
+### Option A — Docker Compose
+
+Compose starts the shared `backend` always. Two profiles pick the frontend:
+`dev` (hot reload, bind mount) and `prod` (optimized standalone build).
+
+**Dev (hot reload):**
 
 ```bash
-docker compose up --build
-# frontend → http://localhost:3000
+docker compose --profile dev up --build
+# frontend → http://localhost:3000   (next dev, bind-mounted source)
 # backend  → http://localhost:5000
 ```
+
+**Prod (slim standalone runtime):**
+
+```bash
+docker compose --profile prod up --build
+# frontend → http://localhost:3001   (next start standalone, no bind mount)
+# backend  → http://localhost:5000
+```
+
+> Only the backend runs without a profile (`docker compose up` starts just the
+> API on :5000). The `frontend-prod` image is built with
+> `NEXT_PUBLIC_API_URL` as a build arg because Next inlines it at `next build`.
+> Manual image builds: `docker build --target dev ./frontend` or
+> `docker build ./frontend` (prod). `.dockerignore` keeps build contexts tiny
+> (`frontend/` ≈ a few kB instead of ~776 MB of node_modules).
 
 ### Option B — Run manually
 
@@ -228,7 +248,8 @@ appdev_ai/
 │   ├── ai_agents/           # multi-agent design pipeline
 │   ├── templates/blank/     # seed for each new workspace
 │   ├── requirements.txt
-│   └── Dockerfile
+│   ├── Dockerfile            # venv + uvicorn on ghcr.io/cirruslabs/flutter:3.41.5
+│   └── .dockerignore
 ├── frontend/
 │   ├── src/
 │   │   ├── app/             # Next.js App Router pages
@@ -238,7 +259,8 @@ appdev_ai/
 │   │   └── types/           # FileNode
 │   ├── package.json
 │   ├── tsconfig.json
-│   └── Dockerfile
+│   ├── Dockerfile            # multi-stage: dev (hot reload) / prod (standalone)
+│   └── .dockerignore
 ├── docs/                    # API.md, ARCHITECTURE.md, TESTING.md, README.md
 ├── docker-compose.yaml
 └── README.md
