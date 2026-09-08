@@ -10,11 +10,12 @@
 │  IDE (Monaco)            │        │  workspace.py            │
 │  FileExplorer            │        │   ├─ new_workspace()     │
 │  PreviewPane (iframe)    │        │   │   (flutter create)   │
-│  BuildContext (SSE)      │        │   ├─ list_tree/read/write│
-└──────────────────────────┘        │   └─ ensure_workspace    │
-                                    │                          │
+│  BuildContext            │        │   ├─ list_tree/read/write│
+│  (bootstrap + build SSE) │        │   └─ ensure_workspace    │
+└──────────────────────────┘        │                          │
                                     │  server.py               │
                                     │   ├─ /api/workspaces     │
+                                    │   ├─ /api/ai/generate    │
                                     │   ├─ /api/.../build (SSE)│
                                     │   └─ /preview/{wid}/...  │
                                     │        │                 │
@@ -28,44 +29,56 @@
 
 ### `server.py` — FastAPI application
 
-- **CORS**: `allow_origins=["*"]` with `allow_credentials=True` (invalid combo —
-  see `issues.md` #8).
-- **`POST /api/workspaces`** → creates a workspace via `workspace.new_workspace()`
-  (sync, blocking `flutter create`, no timeout — `issues.md` #13).
-- **`GET /api/workspaces/{wid}`** → recursive file tree.
+- **CORS**: `allow_origins=["*"]`, `allow_credentials=False` (the app uses no
+  cookies, so the wildcard is spec-valid and cross-origin readers gain nothing).
+- **`POST /api/workspaces`** → creates a workspace via `workspace.new_workspace()`.
+  Bounded by a 120s timeout; failures return a clean 500 and the partial
+  directory is removed.
+- **`GET /api/workspaces/{wid}`** → recursive file tree (hidden and `build/`
+  entries excluded).
 - **`GET/PUT /api/workspaces/{wid}/file`** → read/write a single file with path
   validation (`workspace._validate_relpath`).
-- **`POST /api/workspaces/{wid}/build`** → cleans `build/web`, then returns
-  `{ logs, preview }` URLs. **Does not build.** The build is actually triggered
-  when the frontend opens the SSE stream below.
+- **`POST /api/workspaces/{wid}/build`** → validates the workspace, cleans
+  `build/web`, then returns `{ logs, preview }` URLs. **Does not build.** The
+  build runs when the SSE stream below is opened.
 - **`GET /api/workspaces/{wid}/build/logs`** → SSE stream that runs
-  `flutter pub get` then `flutter build web --release --pwa-strategy=none`,
-  emitting each line as `data: <line>` and one `data: __EXIT__ <code>` after
-  *each* subprocess. The client treats the first `__EXIT__` as completion —
-  which fires after `pub get`, before the real build (see `issues.md` #7).
+  `flutter pub get`, then (only on success) `flutter build web --release
+  --pwa-strategy=none`, under a per-workspace `asyncio.Lock`. Each line is
+  emitted as `data: <line>` and a **single** `data: __EXIT__ <code>` sentinel is
+  emitted at the end of the whole pipeline, so the client can treat it as
+  completion.
 - **`GET /preview/{wid}/build/web/{path:path}`** → serves the built Flutter web
   app. For `index.html`, injects `<base href="/preview/{wid}/build/web/">` so
-  Flutter's asset paths resolve. The `path` segment is **not** validated against
-  the build directory — relies on the ASGI server normalizing `..`
-  (see `issues.md` #2).
+  Flutter's asset paths resolve. `path` is resolved and confined to the build
+  directory with `Path.resolve().is_relative_to()`.
+- **`POST /api/ai/generate`** → lazy-imports the AI pipeline and runs
+  `CoordinatorAgent.generate_design(prompt)`. Returns 503 if the pipeline can't
+  be imported (no key / optional deps missing), so the server never crashes on
+  startup without them.
+- Every `wid` endpoint validates against `^[a-f0-9]{8}$` before touching the
+  filesystem (400 for malformed, 404 for missing).
 
 ### `workspace.py` — workspace provisioning
 
 - `ROOT / "workspaces" / <wid>` holds each project. `.gitignore`d.
-- `new_workspace()` copies `templates/blank/` (a pre-made Flutter app), creates
-  `assets/`, then runs `flutter create . --platforms web` in place.
+- `new_workspace()` checks `flutter` is on `PATH`, copies `templates/blank/`
+  (a pre-made Flutter app), creates `assets/`, then runs
+  `flutter create . --platforms web` with a 120s timeout; any failure removes the
+  partial workspace.
+- `_validate_wid` enforces `^[a-f0-9]{8}$`.
 - `_validate_relpath` enforces `^[A-Za-z0-9_\-./]+$`, rejects absolute paths and
   `..` segments.
 - `write_file` flushes and `os.fsync`s before returning.
+- `list_tree` walks recursively but skips dot-entries (`.dart_tool`, `.git`,
+  `.pub-cache`) and `build/`.
 
 ### `templates/blank/`
 
-A minimal Flutter web app (`lib/main.dart` shows "Hello from your Flutter
-Workspace!"). Ships a `.dart_tool/package_config.json` and `pubspec.lock` that
-contain **absolute machine-specific paths** — these get copied into every new
-workspace (see `issues.md` #14).
+A minimal Flutter web app (`lib/main.dart`). No machine-specific artifacts are
+committed — `.dart_tool/` and `pubspec.lock` were removed from the template and
+gitignored; `flutter pub get` / `flutter create` regenerate them per workspace.
 
-### `ai_agents/` + `gemini_config.py` — AI design pipeline (not wired to server)
+### `ai_agents/` + `gemini_config.py` — AI design pipeline
 
 A LangChain multi-agent pipeline that turns a text prompt into a Flutter app
 design (vision → UX → UI → critique → code → style):
@@ -81,56 +94,59 @@ design (vision → UX → UI → critique → code → style):
 | CoordinatorAgent      | `coordinator.py`       | orchestrates |
 
 Model selection happens in `gemini_config.py` (auto-picks available Gemini
-models, optional LangSmith tracing). Requires `GEMINI_API_KEY` in `backend/.env`.
-
-> This pipeline is **not imported by `server.py`** (the imports are commented
-> out). It runs only via `testing1.py` / `testing2.py`. The `/api/ai/generate`
-> endpoint is also commented out (see `issues.md` #10).
+models, optional LangSmith tracing). Requires `GEMINI_API_KEY` in `backend/.env`
+and the AI deps in `requirements.txt`. It is exposed through `POST
+/api/ai/generate`, imported lazily so the core server runs without it.
 
 ## Frontend
 
 ### `src/app/` — App Router
 
 - `layout.tsx` wraps everything in `ChatWorkspaceLayout` (sidebar + Navbar + content).
-- `page.tsx` renders `IDE` + the AI prompt bar + `PreviewPane` with its **own**
-  `previewVisible` state (independent of the sidebar's — see `issues.md` #9).
+- `page.tsx` renders `IDE`, a build-logs/status terminal, the AI prompt bar, and
+  `PreviewPane`. `previewVisible` comes from `BuildContext`, so the Navbar
+  toggle and the pane stay in sync.
+
+### `src/lib/api.ts`
+
+Single env-driven base URL: `NEXT_PUBLIC_API_URL || "http://localhost:5000"`.
+Every fetch in the app goes through `API_BASE`.
+
+### `src/context/BuildContext.tsx`
+
+Central app state: `workspaceId`, `previewVisible`, `isBuilding`, `logs`,
+`error`, `previewUrl`, `saveSignal`. On mount it `bootstrap()`s a workspace —
+reuses the id in `sessionStorage` or `POST /api/workspaces` to create one.
+`triggerBuild()` POSTs to `/build`, opens the SSE stream, and on the single
+`__EXIT__ 0` sets `previewUrl`; `requestSave()` signals the IDE to persist the
+active file.
 
 ### `src/components/`
 
 - **`WorkspaceLayout.tsx`** — chrome: collapsible sidebar, Projects/Workspace
-  views, AI Responses panel (dead chat state), Navbar. Hardcodes
-  `workspaceId="my-flutter-app"`.
-- **`Navbar.tsx`** — Save / Build / Preview buttons + icons. Build calls
-  `triggerBuild()` from context. Save is a `console.log` (no persistence —
-  `issues.md` #4). `onBuild` prop is dropped.
-- **`IDE.tsx`** — file tree loading, tabbed editor, Monaco integration. Reads
-  `API_BASE = "http://13.235.89.215:5051"` and calls `/api/tree` + `/api/file` —
-  **these endpoints don't exist on the backend** (see `issues.md` #3).
-- **`CodeEditor.tsx`** — loads Monaco from the cdnjs CDN at runtime; Ctrl/Cmd+S
-  wired to an optional `onSave` that `IDE` never passes.
+  views, Navbar. Wraps children in `BuildProvider`.
+- **`Navbar.tsx`** — Save / Build / Preview buttons, driven entirely from
+  `BuildContext` (`requestSave`, `triggerBuild`, `togglePreview`).
+- **`IDE.tsx`** — loads the nested tree from `GET /api/workspaces/{wid}`, tabbed
+  editor, `MonacoEditor`, file save with debounced autosave, and listens for the
+  Navbar's save signal. Shows a real save-state indicator.
+- **`CodeEditor.tsx`** — wraps `@monaco-editor/react` `<Editor>`; Cmd/Ctrl+S
+  triggers `onSave`.
 - **`FileExplorer.tsx`** — recursive tree node; checks `node.type === "dir"`.
-- **`PreviewPane.tsx`** — device frames (iPhone/Pixel/iPad/Desktop) with an
-  iframe pointed at a hardcoded remote URL (`http://13.235.89.215:3000`).
-
-### `src/context/BuildContext.tsx`
-
-Holds `workspaceId`, `isBuilding`, `logs`, `error` and `triggerBuild()`.
-`triggerBuild` POSTs to `http://localhost:8000/api/workspaces/{wid}/build`
-(port 8000 — nothing runs there; backend is 5000) and opens an `EventSource`
-that closes on the first `__EXIT__` event (see `issues.md` #3/#7). The logs are
-never rendered in the UI.
+- **`PreviewPane.tsx`** — device frames (iPhone/Pixel/iPad/Desktop); iframe
+  `src` is the `previewUrl` from context (`API_BASE + /preview/{wid}/...`) with
+  `sandbox="allow-scripts"` only, since the built Flutter app is untrusted.
 
 ### `src/types/file.ts`
 
-`FileNode { id, name, type, children? }` — missing `path`, which the components
-use everywhere. `next build` fails to typecheck for this reason
-(see `issues.md` #5).
+`FileNode { id, path, name, type: "file" | "dir", children? }` — `path` matches
+what the components and the backend tree use.
 
 ## Docker (`docker-compose.yaml`)
 
-- `frontend`: `node:20-bullseye`, `npm run dev`, port 3000, bind-mounted `./frontend`.
-- `backend`: `python:3.11-slim`, `python3 server.py`, port 5000, bind-mounted
-  `./backend`.
-- **Broken**: the backend container runs `python3 server.py`, which exits
-  immediately (no `uvicorn.run`), and the image has no Flutter SDK, so builds
-  would fail anyway (see `issues.md` #1).
+- `frontend`: `node:20-bullseye`, `npm run dev`, port 3000, bind-mounted
+  `./frontend`, `NEXT_PUBLIC_API_URL=http://localhost:5000`.
+- `backend`: `ghcr.io/cirruslabs/flutter:stable` (Flutter + Dart on `PATH`) with
+  python3/pip installed, `CMD ["uvicorn", "server:app", "--host", "0.0.0.0",
+  "--port", "5000"]`, port 5000, bind-mounted `./backend`.
+- The obsolete top-level `version:` key could be dropped (harmless).

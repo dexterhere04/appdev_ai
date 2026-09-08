@@ -40,32 +40,37 @@ npm install
 npm run dev
 ```
 
-> **Note:** the backend must be started with `uvicorn`, not `python server.py`.
-> `server.py` defines the FastAPI `app` but has no `__main__` entrypoint, so
-> `python server.py` exits immediately (see `issues.md` #1).
+> Both entrypoints work: `python server.py` and `uvicorn server:app` — `server.py`
+> ships a `__main__` block that runs uvicorn on port 5000.
 
 ## Repository layout
 
 ```
 appdev_ai/
 ├── backend/
-│   ├── server.py            # FastAPI app: workspaces, files, build SSE, preview
+│   ├── server.py            # FastAPI app: workspaces, files, build SSE, preview, /api/ai/generate
 │   ├── workspace.py         # Flutter workspace provisioning & file operations
 │   ├── gemini_config.py     # Gemini + LangChain model config (AI pipeline)
-│   ├── ai_agents/           # Multi-agent design pipeline (not wired to server)
+│   ├── ai_agents/           # Multi-agent design pipeline (wired via /api/ai/generate)
 │   ├── templates/blank/     # Flutter template copied into every new workspace
-│   ├── testing1.py          # Standalone AI pipeline smoke test
-│   ├── testing2.py          # Full AI workflow demo (writes output/app_design_output.json)
 │   └── requirements.txt
 ├── frontend/
 │   └── src/
 │       ├── app/             # Next.js App Router (page, layout, globals.css)
 │       ├── components/      # IDE, MonacoEditor, FileExplorer, PreviewPane, Navbar, ...
-│       ├── context/         # BuildContext (build state + SSE log stream)
+│       ├── context/         # BuildContext (workspace bootstrap, build state, save, preview)
+│       ├── lib/             # api.ts — env-driven API base URL (NEXT_PUBLIC_API_URL)
 │       └── types/           # Shared TS types
 ├── docker-compose.yaml
 └── docs/                    # This documentation
 ```
+
+## Configuration
+
+- **Frontend → backend URL**: `NEXT_PUBLIC_API_URL` (default `http://localhost:5000`).
+  Set in `docker-compose.yaml`; read once in `frontend/src/lib/api.ts`.
+- **Backend**: requires the Flutter SDK on `PATH` and `GEMINI_API_KEY` in
+  `backend/.env` (the latter only for the optional AI endpoint).
 
 ## Documentation
 
@@ -73,8 +78,10 @@ appdev_ai/
 - [API Reference](API.md) — all backend endpoints
 - [Testing Notes](TESTING.md) — verified behavior from the latest test run
 
-## Known issues
+## Status
 
-See [`issues.md`](../issues.md) for a full code review (20 issues: backend won't
-start under `python server.py` in Docker, path-traversal risk on `/preview`,
-frontend↔backend API contract mismatches, no save path, and more).
+All 20 issues from the code review in [`issues.md`](../issues.md) are fixed:
+backend boots under Docker with the Flutter SDK and uvicorn, the `/preview`
+path-traversal is closed, the frontend talks to the backend through one env-driven
+API base, edits persist to the backend, the build SSE stream reports a single
+final result, and the repo is cleaned of committed build caches and dead files.
