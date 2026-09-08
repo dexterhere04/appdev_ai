@@ -9,23 +9,42 @@ TEMPLATE = ROOT / "templates" / "blank"
 WORKSPACES.mkdir(exist_ok=True, parents=True)
 
 SAFE_PATH = re.compile(r"^[A-Za-z0-9_\-./]+$")
+WID_RE = re.compile(r"^[a-f0-9]{8}$")
+
+def _validate_wid(wid: str) -> None:
+    if not wid or not WID_RE.match(wid):
+        raise ValueError("invalid workspace id")
 
 def new_workspace() -> dict[str, str]:
+    if shutil.which("flutter") is None:
+        raise RuntimeError("flutter not found on PATH")
+
     wid = uuid.uuid4().hex[:8]
     wdir = WORKSPACES / wid
 
     # Copy template
     shutil.copytree(TEMPLATE, wdir)
 
-    # Ensure required folders exist before web setup
-    (wdir / "assets").mkdir(exist_ok=True)
+    try:
+        # Ensure required folders exist before web setup
+        (wdir / "assets").mkdir(exist_ok=True)
 
-    # Run flutter create web config
-    subprocess.run(
-        ["flutter", "create", ".", "--platforms", "web"],
-        cwd=str(wdir),
-        check=True,
-    )
+        # Run flutter create web config
+        subprocess.run(
+            ["flutter", "create", ".", "--platforms", "web"],
+            cwd=str(wdir),
+            check=True,
+            timeout=120,
+        )
+    except subprocess.CalledProcessError as e:
+        shutil.rmtree(wdir, ignore_errors=True)
+        raise RuntimeError(f"flutter create failed: {e}")
+    except subprocess.TimeoutExpired as e:
+        shutil.rmtree(wdir, ignore_errors=True)
+        raise RuntimeError(f"flutter create timed out: {e}")
+    except Exception:
+        shutil.rmtree(wdir, ignore_errors=True)
+        raise
 
     return {"id": wid, "path": str(wdir)}
 
@@ -35,6 +54,7 @@ def _validate_relpath(path: str) -> str:
     return path
 
 def list_tree(wid: str) -> List[Dict[str, Any]]:
+    _validate_wid(wid)
     base = WORKSPACES / wid
     if not base.exists():
         raise FileNotFoundError("workspace not found")
@@ -44,8 +64,12 @@ def list_tree(wid: str) -> List[Dict[str, Any]]:
         for entry in sorted(dir_path.iterdir()):
             rel = entry.relative_to(base).as_posix()
 
+            # Skip hidden/dot entries (e.g. .dart_tool, .pub-cache, .git)
+            if entry.name.startswith("."):
+                continue
+
             # Skip build artifacts
-            if rel.startswith("build/"):
+            if entry.name == "build" or rel.startswith("build/"):
                 continue
 
             if entry.is_dir():
@@ -90,6 +114,7 @@ def write_file(wid: str, rel: str, content: str) -> None:
     print(f"✅ Flushed and saved {f}")
 
 def ensure_workspace(wid: str) -> Path:
+    _validate_wid(wid)
     p = WORKSPACES / wid
     if not p.exists(): raise FileNotFoundError("workspace not found")
     return p
