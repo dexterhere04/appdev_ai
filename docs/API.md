@@ -54,15 +54,26 @@ Hidden entries (names starting with `.`, e.g. `.dart_tool`, `.git`) and build ou
 ## Files
 
 ### `GET /api/workspaces/{wid}/file?path=<relpath>`
-Reads a file.
+Reads a file. Text files return their content; binary files (e.g. images) are
+detected by extension and UTF-8 sniffing and return metadata instead.
 
-**Response 200**
+**Response 200 — text**
 ```json
 { "path": "lib/main.dart", "content": "..." }
 ```
 
+**Response 200 — binary**
+```json
+{ "path": "web/icons/Icon-192.png", "binary": true, "size": 5292, "image": true }
+```
+
 **400** — invalid path (rejected by `SAFE_PATH` regex, `..` segments, absolute path).
 **404** — workspace or file not found.
+
+### `GET /api/workspaces/{wid}/raw?path=<relpath>`
+Returns a file's raw bytes with its content-type guessed from the extension
+(used for image previews / asset downloads). Same path validation and errors as
+`GET /file`; binary files always succeed here.
 
 ### `PUT /api/workspaces/{wid}/file`
 Writes a file (creates parent dirs; `fsync`'d).
@@ -74,6 +85,38 @@ Writes a file (creates parent dirs; `fsync`'d).
 
 **Response 200** — `{ "ok": true }`
 **400/404** — as above.
+
+### `DELETE /api/workspaces/{wid}/file?path=<relpath>`
+Deletes a file, or an empty directory. Empty parent directories are pruned up to
+the workspace root.
+
+**Response 200** — `{ "ok": true }`
+**400** — invalid path, or deleting a non-empty directory.
+**404** — file/directory not found.
+
+### `POST /api/workspaces/{wid}/file/rename`
+Renames/moves a file or directory.
+
+**Request body**
+```json
+{ "path": "lib/hello.dart", "newPath": "lib/greet.dart" }
+```
+
+**Response 200** — `{ "ok": true }`
+**400** — invalid path, or `newPath` already exists.
+**404** — source not found.
+
+### `POST /api/workspaces/{wid}/folder`
+Creates a folder (and any missing parents).
+
+**Request body**
+```json
+{ "path": "lib/widgets" }
+```
+
+**Response 200** — `{ "ok": true }`
+**400** — invalid path, or path already exists.
+**404** — workspace not found.
 
 ## Build & Preview
 

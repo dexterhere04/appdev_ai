@@ -1,11 +1,12 @@
 from __future__ import annotations
 import asyncio, json, os, re, shutil, subprocess, sys
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import workspace as ws
+import dev_server as ds
 
 app = FastAPI()
 app.add_middleware(
@@ -58,10 +59,17 @@ async def serve_preview_file(wid: str, path: str = "index.html"):
         else:
             html = html.replace("<head>", f"<head><base href='{base_href}'>")
 
-        return Response(html, media_type="text/html")
+        return Response(
+            html,
+            media_type="text/html",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
 
     # Proper static file serving
-    return FileResponse(str(resolved))
+    return FileResponse(
+        str(resolved),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 class FilePatch(BaseModel):
     path: str
@@ -89,11 +97,19 @@ def get_tree(wid: str):
 def get_file(wid: str, path: str = Query(...)):
     try:
         _validate_wid(wid)
-        return {"path": path, "content": ws.read_file(wid, path)}
+        info = ws.read_file_info(wid, path)
     except ValueError:
         raise HTTPException(400, "invalid path")
     except FileNotFoundError:
         raise HTTPException(404, "file not found")
+    if "binary" in info:
+        return {
+            "path": path,
+            "binary": True,
+            "size": info["binary"],
+            "image": ws.is_image_path(path),
+        }
+    return {"path": path, "content": info["text"]}
 
 @app.put("/api/workspaces/{wid}/file")
 def put_file(wid: str, patch: FilePatch):
@@ -103,6 +119,58 @@ def put_file(wid: str, patch: FilePatch):
         return {"ok": True}
     except ValueError:
         raise HTTPException(400, "invalid path")
+    except FileNotFoundError:
+        raise HTTPException(404, "workspace not found")
+
+@app.get("/api/workspaces/{wid}/raw")
+def get_raw(wid: str, path: str = Query(...)):
+    """Serve a file's raw bytes (for images/binary assets)."""
+    try:
+        _validate_wid(wid)
+        data = ws.read_file_bytes(wid, path)
+    except ValueError:
+        raise HTTPException(400, "invalid path")
+    except FileNotFoundError:
+        raise HTTPException(404, "file not found")
+    return Response(content=data, media_type=ws.mime_type(path))
+
+@app.delete("/api/workspaces/{wid}/file")
+def delete_file(wid: str, path: str = Query(...)):
+    try:
+        _validate_wid(wid)
+        ws.delete_file(wid, path)
+        return {"ok": True}
+    except ValueError:
+        raise HTTPException(400, "invalid path or directory not empty")
+    except FileNotFoundError:
+        raise HTTPException(404, "file not found")
+
+class RenamePatch(BaseModel):
+    path: str
+    newPath: str
+
+@app.post("/api/workspaces/{wid}/file/rename")
+def rename_file(wid: str, patch: RenamePatch):
+    try:
+        _validate_wid(wid)
+        ws.rename_file(wid, patch.path, patch.newPath)
+        return {"ok": True}
+    except ValueError:
+        raise HTTPException(400, "invalid path or target already exists")
+    except FileNotFoundError:
+        raise HTTPException(404, "file not found")
+
+class FolderPatch(BaseModel):
+    path: str
+
+@app.post("/api/workspaces/{wid}/folder")
+def create_folder(wid: str, patch: FolderPatch):
+    try:
+        _validate_wid(wid)
+        ws.create_folder(wid, patch.path)
+        return {"ok": True}
+    except ValueError:
+        raise HTTPException(400, "invalid path or already exists")
     except FileNotFoundError:
         raise HTTPException(404, "workspace not found")
 
@@ -205,6 +273,66 @@ async def ai_generate(req: AIGenerateRequest):
     except Exception as e:
         raise HTTPException(502, f"AI generation failed: {e}")
     return {"result": result}
+
+# ---- Dev-mode hot reload (flutter run -d web-server) ----
+
+@app.post("/api/workspaces/{wid}/dev/start")
+async def dev_start(wid: str, request: Request):
+    try:
+        _validate_wid(wid)
+        base = ws.ensure_workspace(wid)
+    except ValueError:
+        raise HTTPException(400, "invalid workspace id")
+    except FileNotFoundError:
+        raise HTTPException(404, "workspace not found")
+    try:
+        session = await ds.start(wid, base)
+    except ds.DevServerError as e:
+        raise HTTPException(502, detail=str(e))
+    host = request.headers.get("host", "localhost").split(":")[0] or "localhost"
+    url = f"http://{host}:{session.port}"
+    return {"url": url, "port": session.port, "running": True}
+
+@app.post("/api/workspaces/{wid}/dev/hot-reload")
+async def dev_hot_reload(wid: str):
+    try:
+        _validate_wid(wid)
+        ws.ensure_workspace(wid)
+    except ValueError:
+        raise HTTPException(400, "invalid workspace id")
+    except FileNotFoundError:
+        raise HTTPException(404, "workspace not found")
+    try:
+        note = await ds.hot_reload(wid)
+    except ds.DevServerError as e:
+        raise HTTPException(409, detail=str(e))
+    return {"ok": True, "note": note}
+
+@app.post("/api/workspaces/{wid}/dev/stop")
+async def dev_stop(wid: str):
+    try:
+        _validate_wid(wid)
+        ws.ensure_workspace(wid)
+    except ValueError:
+        raise HTTPException(400, "invalid workspace id")
+    except FileNotFoundError:
+        raise HTTPException(404, "workspace not found")
+    await ds.stop(wid)
+    return {"ok": True}
+
+@app.get("/api/workspaces/{wid}/dev/logs")
+async def dev_logs(wid: str, lines: int = Query(60, ge=1, le=500)):
+    try:
+        _validate_wid(wid)
+        ws.ensure_workspace(wid)
+    except ValueError:
+        raise HTTPException(400, "invalid workspace id")
+    except FileNotFoundError:
+        raise HTTPException(404, "workspace not found")
+    session = ds.get_session(wid)
+    if not session:
+        raise HTTPException(404, "no dev server running for this workspace")
+    return {"logs": session.tail(lines), "running": session.running, "port": session.port}
 
 if __name__ == "__main__":
     import uvicorn
