@@ -14,6 +14,10 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
 # Serve built previews from /workspaces/<id>/build/web
 _build_locks: dict[str, asyncio.Lock] = {}
 

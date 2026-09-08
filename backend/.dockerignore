@@ -1,0 +1,11 @@
+workspaces
+__pycache__
+*.pyc
+.env
+output
+.git
+.gitignore
+templates/blank/.dart_tool
+templates/blank/pubspec.lock
+Dockerfile
+.dockerignore
