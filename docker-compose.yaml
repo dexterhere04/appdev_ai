@@ -4,13 +4,24 @@ services:
     image: flutter-cloud-builder-backend:latest
     ports:
       - "5000:5000"
-      # Dev-mode flutter run -d web-server hot-reload sessions (per workspace).
+      # Per-project flutter run -d web-server hot-reload origins. Flutter's
+      # debug tooling (DWDS) opens a root-absolute WebSocket on the dev server's
+      # own origin, so each project needs a reachable host port. The backend
+      # allocates ports in DEV_WEB_PORT_START..+COUNT (dev_server.py).
       - "8100-8131:8100-8131"
     environment:
       # Optional: enable the AI pipeline (read from shell or a root .env file).
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # Deploy-time secret for session/preview-token signing (must be set).
+      FCB_SECRET: ${FCB_SECRET:-}
+      # Frontend origin allowlist (comma separated; NO wildcard in prod).
+      # Default tracks FRONTEND_PORT (dev) and the prod profile port (3001).
+      FCB_ALLOWED_ORIGINS: ${FCB_ALLOWED_ORIGINS:-http://localhost:${FRONTEND_PORT:-3000},http://localhost:3001}
     volumes:
       - ./backend:/app
+    # Resource limits so one user's build cannot starve the host (Agent 3).
+    mem_limit: 6g
+    cpus: 3
     healthcheck:
       test:
         - CMD

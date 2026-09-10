@@ -6,8 +6,13 @@
 # ---- deps: install from lockfile (cached independently of source) ----
 FROM node:20-bullseye AS deps
 WORKDIR /app
+# Prefer IPv4: some hosts publish AAAA records for the npm registry but have no
+# working IPv6 route, which makes installs hang on connection timeouts.
+ENV NODE_OPTIONS=--dns-result-order=ipv4first
 COPY package.json package-lock.json ./
-RUN npm ci
+# Cache mount keeps the npm download cache across builds (BuildKit/buildx), so
+# rebuilds don't re-download every tarball on slow links.
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 
 # ---- dev: full source + node_modules, hot reload ----
 FROM node:20-bullseye AS dev

@@ -3,161 +3,110 @@
 ## High-level flow
 
 ```
-┌──────────────────────────┐        ┌──────────────────────────┐
-│       Frontend (3000)    │  HTTP  │        Backend (5000)    │
-│  Next.js 16 / React 19   │◄──────►│        FastAPI           │
-│                          │        │                          │
-│  IDE (Monaco)            │        │  workspace.py            │
-│  FileExplorer            │        │   ├─ new_workspace()     │
-│  PreviewPane (iframe)    │        │   │   (flutter create)   │
-│  BuildContext            │        │   ├─ list_tree/read/write│
-│  (bootstrap + build SSE) │        │   └─ ensure_workspace    │
-└──────────────────────────┘        │                          │
-                                    │  server.py               │
-                                    │   ├─ /api/workspaces     │
-                                    │   ├─ /api/ai/generate    │
-                                    │   ├─ /api/.../build (SSE)│
-                                    │   └─ /preview/{wid}/...  │
-                                    │        │                 │
-                                    │        ▼                 │
-                                    │   Flutter SDK            │
-                                    │   (pub get, build web)   │
-                                    └──────────────────────────┘
+┌──────────────────────────┐         ┌──────────────────────────────────────┐
+│       Frontend (3000)    │  HTTP   │         Backend (5000)               │
+│  Next.js 16 / React 19   │◄───────►│  FastAPI                            │
+│  AuthProvider            │  +SSE   │   routers/                          │
+│  BuildProvider (project) │         │    ├─ auth.py        (sessions)     │
+│  IDE (bundled Monaco)    │         │    ├─ projects.py    (CRUD+files)   │
+│  FileExplorer            │         │    ├─ build.py       (SSE build)    │
+│  PreviewPane (iframe)    │         │    ├─ preview.py     (signed serve) │
+│  AI prompt bar (SSE)     │         │    ├─ dev.py         (dev lifecycle)│
+│                          │         │   db.py        (SQLite metadata)    │
+│                          │         │   workspace.py  (files + flutter)   │
+│                          │         │   envpolicy.py  (secret-free env)   │
+│                          │         │   ai_pipeline.py(validated apply)   │
+│                          │         │   lifecycle.py  (GC loop)           │
+│                          │         │   metrics.py    (logs + counters)   │
+│                          │         └──────────────┬──────────────────────┘
+│                          │                        ▼
+│                          │            Flutter SDK (per project dir)
+└──────────────────────────┘
 ```
 
-## Backend
+## Identity & tenancy
 
-### `server.py` — FastAPI application
+- Accounts: email + password (PBKDF2 hashed). Session = opaque token; only its
+  SHA-256 is stored, in the `sessions` table.
+- **Every** project route resolves the caller via `get_current_user`
+  (`routers/deps.py`) and enforces ownership via `db.require_project(pid, user)`
+  (403 on mismatch). Unauthenticated → 401.
+- On-disk ownership is structural: projects live under
+  `workspaces/<owner_id>/<pid>/`, so a route-guard bypass still cannot read
+  another user's tree.
+- No `wid` capability tokens remain; preview/dev access uses short-lived signed
+  tokens minted only inside authenticated handlers.
 
-- **CORS**: `allow_origins=["*"]`, `allow_credentials=False` (the app uses no
-  cookies, so the wildcard is spec-valid and cross-origin readers gain nothing).
-- **`POST /api/workspaces`** → creates a workspace via `workspace.new_workspace()`.
-  Bounded by a 120s timeout; failures return a clean 500 and the partial
-  directory is removed.
-- **`GET /api/workspaces/{wid}`** → recursive file tree (hidden and `build/`
-  entries excluded).
-- **`GET/PUT /api/workspaces/{wid}/file`** → read/write a single file with path
-  validation (`workspace._validate_relpath`).
-- **`POST /api/workspaces/{wid}/build`** → validates the workspace, cleans
-  `build/web`, then returns `{ logs, preview }` URLs. **Does not build.** The
-  build runs when the SSE stream below is opened.
-- **`GET /api/workspaces/{wid}/build/logs`** → SSE stream that runs
-  `flutter pub get`, then (only on success) `flutter build web --release
-  --pwa-strategy=none`, under a per-workspace `asyncio.Lock`. Each line is
-  emitted as `data: <line>` and a **single** `data: __EXIT__ <code>` sentinel is
-  emitted at the end of the whole pipeline, so the client can treat it as
-  completion.
-- **`GET /preview/{wid}/build/web/{path:path}`** → serves the built Flutter web
-  app. For `index.html`, injects `<base href="/preview/{wid}/build/web/">` so
-  Flutter's asset paths resolve. `path` is resolved and confined to the build
-  directory with `Path.resolve().is_relative_to()`.
-- **`POST /api/ai/generate`** → lazy-imports the AI pipeline and runs
-  `CoordinatorAgent.generate_design(prompt)`. Returns 503 if the pipeline can't
-  be imported (no key / optional deps missing), so the server never crashes on
-  startup without them.
-- Every `wid` endpoint validates against `^[a-f0-9]{8}$` before touching the
-  filesystem (400 for malformed, 404 for missing).
+## Metadata store (`db.py`)
 
-### `workspace.py` — workspace provisioning
+SQLite at `backend/var/app.db` (env `FCB_DB_PATH`), WAL mode, schema in
+`db.init_db()`: `users`, `sessions`, `projects`. Routers never write SQL — they
+call repository functions. `docs/CONTRACTS.md` freezes the schema and route
+shapes.
 
-- `ROOT / "workspaces" / <wid>` holds each project. `.gitignore`d.
-- `new_workspace()` checks `flutter` is on `PATH`, copies `templates/blank/`
-  (a pre-made Flutter app), creates `assets/`, then runs
-  `flutter create . --platforms web` with a 120s timeout; any failure removes the
-  partial workspace.
-- `_validate_wid` enforces `^[a-f0-9]{8}$`.
-- `_validate_relpath` enforces `^[A-Za-z0-9_\-./]+$`, rejects absolute paths and
-  `..` segments.
-- `write_file` flushes and `os.fsync`s before returning.
-- `list_tree` walks recursively but skips dot-entries (`.dart_tool`, `.git`,
-  `.pub-cache`) and `build/`.
+## Build & preview
 
-### `templates/blank/`
+- `POST /api/projects/{pid}/build` cleans `build/web` and returns `{logs,
+  preview}`; it does **not** build. Opening `GET .../build/logs` runs
+  `flutter pub get` then `flutter build web --release --pwa-strategy=none`
+  under a per-project lock + a global concurrency semaphore
+  (`config.MAX_CONCURRENT_BUILDS`). A **single** `data: __EXIT__ <code>`
+  sentinel closes the stream. `POST .../build/cancel` closes the generator,
+  killing subprocesses.
+- Subprocesses get a **secret-free allowlist env** (`envpolicy.build_env()`)
+  plus CPU/AS rlimits and a hard timeout — never `os.environ`.
+- `GET /preview/{pid}/...` serves the release build. The `?access=` token (or
+  the path-scoped HttpOnly cookie set on `index.html`) proves authorization;
+  no token → 404. `index.html` `<base href>` is rewritten to `/preview/{pid}/`.
 
-A minimal Flutter web app (`lib/main.dart`). No machine-specific artifacts are
-committed — `.dart_tool/` and `pubspec.lock` were removed from the template and
-gitignored; `flutter pub get` / `flutter create` regenerate them per workspace.
+## Hot-reload dev preview
 
-### `ai_agents/` + `gemini_config.py` — AI design pipeline
+- `POST /api/projects/{pid}/dev/start` runs `flutter run -d web-server` on a
+  per-project port (per-user cap). The returned `url` is a **direct origin**
+  `http://<host>:<port>/`. Flutter's debug tooling (DWDS) opens a root-absolute
+  WebSocket (`ws://<host>:<port>/$dwdsSseHandler`) that cannot live behind a
+  shared sub-path proxy, so each dev server must be reachable at its own origin.
+  docker-compose publishes `8100-8131` for this. Because the dev origin differs
+  from the app origin, its iframe gets `sandbox="allow-scripts
+  allow-same-origin"` (which only grants the dev origin, not the app's).
+- Run mode is an explicit user choice in the frontend (Hot reload vs Build),
+  not derived from `NODE_ENV`.
 
-A LangChain multi-agent pipeline that turns a text prompt into a Flutter app
-design (vision → UX → UI → critique → code → style):
+## AI pipeline
 
-| Agent                 | File                   | Model role   |
-| --------------------- | ---------------------- | ------------ |
-| CreativeDirectorAgent | `creative_director.py` | `planner`    |
-| UXArchitectAgent      | `ux_architect.py`      | `planner`    |
-| UIDesignerAgent       | `ui_designer.py`       | `codewriter` |
-| CriticAgent           | `critic.py`            | `reviewer`   |
-| CodewriterAgent       | `codewriter.py`        | `codewriter` |
-| StylistAgent          | `stylist.py`           | `stylist`    |
-| CoordinatorAgent      | `coordinator.py`       | orchestrates |
+- `ai_pipeline.run_pipeline()` runs the multi-agent Gemini coordinator and
+  **normalizes its output to validated `{path, content}` files** that are
+  written into the project via the same repository as manual edits.
+- Model output is untrusted: path charset/`..` checks, reserved-root rejection,
+  per-file size + count caps (`ai_pipeline.MAX_*`).
+- Without a `GEMINI_API_KEY` the coordinator import fails → a deterministic
+  fallback Flutter app is generated (same response shape), so "get a scaffold"
+  never depends on the model. Progress is streamed agent-by-agent on the
+  `/generate/stream` variant.
 
-Model selection happens in `gemini_config.py` (auto-picks available Gemini
-models, optional LangSmith tracing). Requires `GEMINI_API_KEY` in `backend/.env`
-and the AI deps in `requirements.txt`. It is exposed through `POST
-/api/ai/generate`, imported lazily so the core server runs without it.
+## Lifecycle, ops
 
-## Frontend
-
-### `src/app/` — App Router
-
-- `layout.tsx` wraps everything in `ChatWorkspaceLayout` (sidebar + Navbar + content).
-- `page.tsx` renders `IDE`, a build-logs/status terminal, the AI prompt bar, and
-  `PreviewPane`. `previewVisible` comes from `BuildContext`, so the Navbar
-  toggle and the pane stay in sync.
-
-### `src/lib/api.ts`
-
-Single env-driven base URL: `NEXT_PUBLIC_API_URL || "http://localhost:5000"`.
-Every fetch in the app goes through `API_BASE`.
-
-### `src/context/BuildContext.tsx`
-
-Central app state: `workspaceId`, `previewVisible`, `isBuilding`, `logs`,
-`error`, `previewUrl`, `saveSignal`. On mount it `bootstrap()`s a workspace —
-reuses the id in `sessionStorage` or `POST /api/workspaces` to create one.
-`triggerBuild()` POSTs to `/build`, opens the SSE stream, and on the single
-`__EXIT__ 0` sets `previewUrl`; `requestSave()` signals the IDE to persist the
-active file.
-
-### `src/components/`
-
-- **`WorkspaceLayout.tsx`** — chrome: collapsible sidebar, Projects/Workspace
-  views, Navbar. Wraps children in `BuildProvider`.
-- **`Navbar.tsx`** — Save / Build / Preview buttons, driven entirely from
-  `BuildContext` (`requestSave`, `triggerBuild`, `togglePreview`).
-- **`IDE.tsx`** — loads the nested tree from `GET /api/workspaces/{wid}`, tabbed
-  editor, `MonacoEditor`, file save with debounced autosave, and listens for the
-  Navbar's save signal. Shows a real save-state indicator.
-- **`CodeEditor.tsx`** — wraps `@monaco-editor/react` `<Editor>`; Cmd/Ctrl+S
-  triggers `onSave`.
-- **`FileExplorer.tsx`** — recursive tree node; checks `node.type === "dir"`.
-- **`PreviewPane.tsx`** — device frames (iPhone/Pixel/iPad/Desktop); iframe
-  `src` is the `previewUrl` from context (`API_BASE + /preview/{wid}/...`) with
-  `sandbox="allow-scripts"` only, since the built Flutter app is untrusted.
-
-### `src/types/file.ts`
-
-`FileNode { id, path, name, type: "file" | "dir", children? }` — `path` matches
-what the components and the backend tree use.
+- `lifecycle.py` runs a periodic GC: purges expired sessions and removes orphan
+  project dirs (dirs with no DB row), pruning empty owner dirs.
+- `metrics.py` adds JSON-lines access logging (request id, user id, latency —
+  no secrets/PII beyond user id) and in-process counters at `/metrics`.
+- `config.py` centralizes env config; deploy-time secrets (`FCB_SECRET`,
+  `GEMINI_API_KEY`) are never baked into images or build environments.
 
 ## Docker (`docker-compose.yaml`)
 
-The `backend` service runs always; two profiles select the frontend variant.
+- `backend`: always on. Flutter SDK base image, dedicated venv, pinned deps,
+  resource limits (`mem_limit`, `cpus`), healthcheck on `/healthz`. Secrets and
+  the CORS allowlist come from environment (`FCB_SECRET`, `FCB_ALLOWED_ORIGINS`).
+- `frontend` (profile `dev`): hot reload, bind mount.
+- `frontend-prod` (profile `prod`): Next standalone runtime, `NEXT_PUBLIC_API_URL`
+  inlined at build.
 
-- `backend`: `ghcr.io/cirruslabs/flutter:3.41.5` (Flutter 3.41.5 + Dart on `PATH`),
-  a dedicated `/opt/venv` (Ubuntu python3 is PEP-668 managed), pinned
-  `requirements.txt`, `CMD ["uvicorn", "server:app", "--host", "0.0.0.0",
-  "--port", "5000"]`, port 5000, bind-mounted `./backend`, `healthcheck` on
-  `GET /healthz`, `restart: unless-stopped`. `GEMINI_API_KEY` is passed from the
-  environment (never baked into the image).
-- `frontend` (profile `dev`): hot reload. Multi-stage `node:20-bullseye` build,
-  target `dev` (`npm run dev`), `./frontend` bind-mounted with an anonymous
-  `/app/node_modules` volume, port 3000.
-- `frontend-prod` (profile `prod`): production. Multi-stage build, target `prod`
-  = Next.js **standalone** output (`output: "standalone"`) copied onto
-  `node:20-bullseye-slim`, run as `node` user via `node server.js`, port 3001.
-  `NEXT_PUBLIC_API_URL` is passed as a **build arg** (inlined at `next build`).
-- `.dockerignore` files keep build contexts tiny (no `node_modules`, `.next`,
-  `workspaces/`, `__pycache__/`, `.env`, caches) and prevent baking secrets.
+## Frontend
+
+- `src/context/AuthContext.tsx` — session (login/register/logout, token restore).
+- `src/context/BuildContext.tsx` — active project, projects list, run mode
+  (`dev` | `release`), preview/build state, SSE consumers.
+- `src/lib/api.ts` — single authed client (`api.*`) + SSE body reader (auth-usable,
+  since `EventSource` cannot send headers).
+- Monaco is bundled locally (no runtime CDN), wired through Turbopack workers.

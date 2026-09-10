@@ -1,0 +1,50 @@
+name: e2e
+
+# Money-path E2E. Heavy (full backend + flutter + frontend), so it runs on
+# master pushes and manual dispatch rather than every PR.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  money-path:
+    runs-on: ubuntu-latest
+    env:
+      FCB_SECRET: ci-e2e-secret
+      E2E_FRONTEND_URL: http://localhost:3001
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run backend + frontend-prod (compose prod profile, built here)
+        run: docker compose --profile prod up -d --build
+        env:
+          FCB_SECRET: ci-e2e-secret
+          FCB_ALLOWED_ORIGINS: http://localhost:3001
+          NEXT_PUBLIC_API_URL: http://localhost:5000
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:5000/healthz && break
+            sleep 5
+          done
+          curl -sf http://localhost:5000/healthz
+
+      - name: Install Playwright
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Run money-path E2E
+        working-directory: frontend
+        run: npx playwright test
+
+      - name: Show backend logs on failure
+        if: failure()
+        run: docker compose logs backend
+
+      - name: Teardown
+        if: always()
+        run: docker compose --profile prod down -v

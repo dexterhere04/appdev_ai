@@ -7,6 +7,8 @@ import socket
 from pathlib import Path
 from typing import Dict, Optional
 
+import envpolicy
+
 # Range of host ports used for per-workspace `flutter run -d web-server` dev
 # servers. docker-compose publishes DEV_WEB_PORT_START..+DEV_WEB_PORT_COUNT so
 # the browser can reach the servers directly (also works for local dev without
@@ -31,9 +33,10 @@ def _clean(text: str) -> str:
 
 
 class DevSession:
-    def __init__(self, wid: str, port: int):
+    def __init__(self, wid: str, port: int, owner_id: str):
         self.wid = wid
         self.port = port
+        self.owner_id = owner_id
         self.proc: Optional[asyncio.subprocess.Process] = None
         self.buffer: str = ""
         self.ready = asyncio.Event()
@@ -61,7 +64,7 @@ def _port_free(port: int) -> bool:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            s.bind(("0.0.0.0", port))
+            s.bind(("0.0.0.0", port))  # nosec B104 - bound inside the container only
             return True
         finally:
             s.close()
@@ -74,7 +77,7 @@ def _alloc_port() -> int:
         if _port_free(p):
             return p
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("0.0.0.0", 0))
+    s.bind(("0.0.0.0", 0))  # nosec B104 - ephemeral port probe for the dev proxy
     port = s.getsockname()[1]
     s.close()
     return port
@@ -82,6 +85,14 @@ def _alloc_port() -> int:
 
 def get_session(wid: str) -> Optional[DevSession]:
     return _sessions.get(wid)
+
+
+def running_sessions() -> list[DevSession]:
+    return [s for s in _sessions.values() if s.running]
+
+
+def running_for_user(owner_id: str) -> list[DevSession]:
+    return [s for s in running_sessions() if s.owner_id == owner_id]
 
 
 async def _reader(session: DevSession) -> None:
@@ -123,7 +134,7 @@ async def _run_pub_get(session: DevSession, base: Path, env: dict) -> None:
         raise DevServerError(f"flutter pub get failed:\n{session.tail(40)}")
 
 
-async def start(wid: str, base: Path) -> DevSession:
+async def start(wid: str, base: Path, owner_id: str | None = None) -> DevSession:
     """Start (or return the running) `flutter run -d web-server` for a workspace."""
     if wid not in _start_locks:
         _start_locks[wid] = asyncio.Lock()
@@ -136,9 +147,9 @@ async def start(wid: str, base: Path) -> DevSession:
             await _terminate(existing)
 
         port = _alloc_port()
-        session = DevSession(wid, port)
+        session = DevSession(wid, port, owner_id or "")
         _sessions[wid] = session
-        env = {**os.environ, "PUB_CACHE": os.path.expanduser("~/.pub-cache")}
+        env = envpolicy.build_env()
 
         # Ensure dependencies are resolved for the current environment's pub
         # cache (a fresh container has an empty cache).

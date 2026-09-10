@@ -4,8 +4,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { FileNode } from "@/types/file";
 import { FileExplorerItem } from "@/components/FileExplorer";
 import { MonacoEditor } from "@/components/CodeEditor";
-import { useBuild } from "@/context/BuildContext";
-import { API_BASE } from "@/lib/api";
+import { useBuild, subscribeTreeReload } from "@/context/BuildContext";
+import { filesApi, describeError } from "@/lib/api";
 import {
   X,
   PanelLeftClose,
@@ -19,6 +19,8 @@ import {
   Trash2,
   Image as ImageIcon,
   FileX2,
+  Download,
+  Loader2,
 } from "lucide-react";
 
 const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|ico|bmp|tiff|svg)$/i;
@@ -44,14 +46,15 @@ type NameModal =
   | null;
 
 export default function IDE() {
-  const { workspaceId, saveSignal, registerBuildFlush, schedulePreviewRefresh } =
-    useBuild();
+  const { project, registerBuildFlush, schedulePreviewRefresh } = useBuild();
+  const pid = project?.id ?? null;
 
   const [tree, setTree] = useState<FileNode[]>([]);
   const [openFiles, setOpenFiles] = useState<FileNode[]>([]);
   const [activeFile, setActiveFile] = useState<FileNode | null>(null);
   const [fileContents, setFileContents] = useState<Record<string, string>>({});
   const [binaryInfo, setBinaryInfo] = useState<Record<string, BinaryInfo>>({});
+  const [rawUrls, setRawUrls] = useState<Record<string, string>>({});
   const [dirtyPaths, setDirtyPaths] = useState<Set<string>>(new Set());
   const [explorerCollapsed, setExplorerCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -66,6 +69,7 @@ export default function IDE() {
   const activeFileRef = useRef<FileNode | null>(null);
   const fileContentsRef = useRef<Record<string, string>>({});
   const binaryInfoRef = useRef<Record<string, BinaryInfo>>({});
+  const rawUrlsRef = useRef<Record<string, string>>({});
   const dirtyRef = useRef<Set<string>>(new Set());
   const openFilesRef = useRef<FileNode[]>(openFiles);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -84,6 +88,9 @@ export default function IDE() {
     binaryInfoRef.current = binaryInfo;
   }, [binaryInfo]);
   useEffect(() => {
+    rawUrlsRef.current = rawUrls;
+  }, [rawUrls]);
+  useEffect(() => {
     dirtyRef.current = dirtyPaths;
   }, [dirtyPaths]);
 
@@ -93,41 +100,75 @@ export default function IDE() {
     noticeTimer.current = setTimeout(() => setNotice(null), 6000);
   }, []);
 
-  const errText = useCallback((status: number): string => {
-    if (status === 404) return "Not found (404)";
-    if (status === 400) return "Invalid path or name (400)";
-    if (status >= 500) return `Server error (${status})`;
-    return `Request failed (${status})`;
+  // Revoke blob URLs owned by the IDE (avoid leaking object URLs).
+  const releaseUrls = useCallback((paths: string[]) => {
+    setRawUrls((prev) => {
+      const next = { ...prev };
+      for (const p of paths) {
+        const url = next[p];
+        if (url) URL.revokeObjectURL(url);
+        delete next[p];
+      }
+      return next;
+    });
   }, []);
 
   // ---- Tree ----
   const refreshTree = useCallback(async () => {
-    if (!workspaceId) return;
+    if (!pid) return;
     try {
-      const res = await fetch(`${API_BASE}/api/workspaces/${workspaceId}`);
-      if (!res.ok) throw new Error(`Failed to load file tree (${res.status})`);
-      const data = await res.json();
-      setTree(data.files ?? []);
+      const nodes = await filesApi.tree(pid);
+      setTree(nodes);
     } catch (err) {
       console.error("Failed to fetch file tree:", err);
       showNotice(
-        `Could not load file tree: ${
-          err instanceof Error ? err.message : "unknown error"
-        }`
+        `Could not load file tree: ${err instanceof Error ? describeError(err) : "unknown error"}`
       );
     }
-  }, [workspaceId, showNotice]);
+  }, [pid, showNotice]);
 
   useEffect(() => {
-    if (!workspaceId) return;
-    setLoading(true);
-    refreshTree().finally(() => setLoading(false));
-  }, [workspaceId, refreshTree]);
+    if (!pid) return;
+    const timer = setTimeout(() => {
+      void refreshTree().finally(() => setLoading(false));
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [pid, refreshTree]);
+
+  // AI or other external edits should refresh the tree. The IDE remounts per
+  // project (see WorkspaceLayout), so subscribing here is per-project.
+  useEffect(() => {
+    if (!pid) return;
+    const unsubscribe = subscribeTreeReload(() => {
+      void refreshTree();
+    });
+    return unsubscribe;
+  }, [pid, refreshTree]);
+
+  // Fetch binary/image bytes (authed) and expose them as an object URL.
+  const loadRawUrl = useCallback(
+    async (path: string) => {
+      if (!pid || rawUrlsRef.current[path]) return;
+      try {
+        const blob = await filesApi.rawBlob(pid, path);
+        if (!pid || !openFilesRef.current.some((f) => f.path === path)) {
+          URL.revokeObjectURL(URL.createObjectURL(blob));
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        setRawUrls((prev) => ({ ...prev, [path]: url }));
+      } catch (err) {
+        console.error("Failed to load image bytes:", err);
+        showNotice(`Could not load image ${path}.`);
+      }
+    },
+    [pid, showNotice]
+  );
 
   // ---- Open / load a file ----
   const loadFile = useCallback(
     async (file: FileNode) => {
-      if (file.type !== "file" || !workspaceId) return;
+      if (file.type !== "file" || !pid) return;
 
       if (!openFilesRef.current.some((f) => f.path === file.path)) {
         setOpenFiles((prev) => [...prev, file]);
@@ -140,72 +181,84 @@ export default function IDE() {
       if (hasContent) return;
 
       try {
-        const res = await fetch(
-          `${API_BASE}/api/workspaces/${workspaceId}/file?path=${encodeURIComponent(
-            file.path
-          )}`
-        );
-        if (!res.ok) {
-          if (res.status === 404) {
-            showNotice(`File no longer exists (${file.path}).`);
-            setOpenFiles((prev) => prev.filter((f) => f.path !== file.path));
-          } else {
-            throw new Error(errText(res.status));
-          }
-          return;
-        }
-        const data = await res.json();
-        if (data.binary) {
+        const data = await filesApi.read(pid, file.path);
+        if ("binary" in data && data.binary) {
           setBinaryInfo((prev) => ({
             ...prev,
             [file.path]: {
-              size: data.size ?? 0,
+              size: data.size,
               image: data.image === true || IMAGE_EXTENSIONS.test(file.path),
             },
           }));
-        } else {
+          if (data.image) {
+            void loadRawUrl(file.path);
+          }
+        } else if ("content" in data) {
           setFileContents((prev) => ({ ...prev, [file.path]: data.content }));
         }
       } catch (err) {
-        console.error("Failed to load file:", err);
-        showNotice(
-          `Failed to load ${file.path}: ${
-            err instanceof Error ? err.message : "unknown error"
-          }`
-        );
-        setOpenFiles((prev) => prev.filter((f) => f.path !== file.path));
+        const status = (err as { status?: number })?.status;
+        if (status === 404) {
+          showNotice(`File no longer exists (${file.path}).`);
+          setOpenFiles((prev) => prev.filter((f) => f.path !== file.path));
+        } else {
+          console.error("Failed to load file:", err);
+          showNotice(
+            `Failed to load ${file.path}: ${err instanceof Error ? describeError(err) : "unknown error"}`
+          );
+          setOpenFiles((prev) => prev.filter((f) => f.path !== file.path));
+        }
       }
     },
-    [workspaceId, errText, showNotice]
+    [pid, showNotice, loadRawUrl]
+  );
+
+
+  const downloadRaw = useCallback(
+    async (path: string) => {
+      if (!pid) return;
+      try {
+        const blob = await filesApi.rawBlob(pid, path);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = baseName(path);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+      } catch (err) {
+        console.error("Failed to download raw file:", err);
+        showNotice(
+          `Download failed: ${err instanceof Error ? describeError(err) : "unknown error"}`
+        );
+      }
+    },
+    [pid, showNotice]
   );
 
   // ---- Save ----
   const persistFile = useCallback(
     async (path: string): Promise<void> => {
-      if (!workspaceId) return;
+      if (!pid) return;
       if (binaryInfoRef.current[path]) {
         throw new Error(`${path} is binary and cannot be saved.`);
       }
       const content = fileContentsRef.current[path];
       if (content === undefined) return;
-      const res = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/file`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, content }),
-      });
-      if (!res.ok) throw new Error(errText(res.status));
+      await filesApi.write(pid, path, content);
       setDirtyPaths((prev) => {
         const next = new Set(prev);
         next.delete(path);
         return next;
       });
     },
-    [workspaceId, errText]
+    [pid]
   );
 
   const saveActiveFile = useCallback(async () => {
     const file = activeFileRef.current;
-    if (!file || !workspaceId) return;
+    if (!file || !pid) return;
     setSaveState("saving");
     try {
       await persistFile(file.path);
@@ -216,12 +269,10 @@ export default function IDE() {
       console.error("Failed to save file:", err);
       setSaveState("error");
       showNotice(
-        `Save failed for ${file.path}: ${
-          err instanceof Error ? err.message : "unknown error"
-        }`
+        `Save failed for ${file.path}: ${err instanceof Error ? describeError(err) : "unknown error"}`
       );
     }
-  }, [workspaceId, persistFile, showNotice, schedulePreviewRefresh]);
+  }, [pid, persistFile, showNotice, schedulePreviewRefresh]);
 
   const saveAllDirty = useCallback(async () => {
     const paths = [...dirtyRef.current];
@@ -235,9 +286,7 @@ export default function IDE() {
         failed = true;
         console.error("Failed to save file:", err);
         showNotice(
-          `Save failed for ${p}: ${
-            err instanceof Error ? err.message : "unknown error"
-          }`
+          `Save failed for ${p}: ${err instanceof Error ? describeError(err) : "unknown error"}`
         );
       }
     }
@@ -270,15 +319,15 @@ export default function IDE() {
   );
 
   useEffect(() => {
-    if (saveSignal > 0) saveActiveFile();
-  }, [saveSignal, saveActiveFile]);
-
-  useEffect(() => {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       if (noticeTimer.current) clearTimeout(noticeTimer.current);
+      for (const url of Object.values(rawUrlsRef.current)) {
+        URL.revokeObjectURL(url);
+      }
+      registerBuildFlush(async () => {});
     };
-  }, []);
+  }, [registerBuildFlush]);
 
   // ---- Close a tab ----
   const closeFile = useCallback((file: FileNode, e?: React.MouseEvent) => {
@@ -291,6 +340,7 @@ export default function IDE() {
     }
     const remaining = openFilesRef.current.filter((f) => f.path !== file.path);
     setOpenFiles(remaining);
+    releaseUrls([file.path]);
     setActiveFile((prev) =>
       prev && prev.path === file.path
         ? remaining.length
@@ -298,39 +348,46 @@ export default function IDE() {
           : null
         : prev
     );
-  }, []);
+  }, [releaseUrls]);
 
   // ---- Tab bookkeeping helpers ----
-  const dropTabsAt = useCallback((path: string, onlyChildren: boolean) => {
-    const match = (p: string) =>
-      onlyChildren
-        ? p.startsWith(path + "/")
-        : p === path || p.startsWith(path + "/");
-    const remaining = openFilesRef.current.filter((f) => !match(f.path));
-    setOpenFiles(remaining);
-    setActiveFile((prev) =>
-      prev && !remaining.some((f) => f.path === prev.path)
-        ? remaining.length
-          ? remaining[0]
-          : null
-        : prev
-    );
-    setFileContents((prev) => {
-      const next = { ...prev };
-      for (const k of Object.keys(next)) if (match(k)) delete next[k];
-      return next;
-    });
-    setBinaryInfo((prev) => {
-      const next = { ...prev };
-      for (const k of Object.keys(next)) if (match(k)) delete next[k];
-      return next;
-    });
-    setDirtyPaths((prev) => {
-      const next = new Set(prev);
-      for (const p of prev) if (match(p)) next.delete(p);
-      return next;
-    });
-  }, []);
+  const dropTabsAt = useCallback(
+    (path: string, onlyChildren: boolean) => {
+      const match = (p: string) =>
+        onlyChildren
+          ? p.startsWith(path + "/")
+          : p === path || p.startsWith(path + "/");
+      const remaining = openFilesRef.current.filter((f) => !match(f.path));
+      const removedPaths = openFilesRef.current
+        .filter((f) => match(f.path))
+        .map((f) => f.path);
+      releaseUrls(removedPaths);
+      setOpenFiles(remaining);
+      setActiveFile((prev) =>
+        prev && !remaining.some((f) => f.path === prev.path)
+          ? remaining.length
+            ? remaining[0]
+            : null
+          : prev
+      );
+      setFileContents((prev) => {
+        const next = { ...prev };
+        for (const k of Object.keys(next)) if (match(k)) delete next[k];
+        return next;
+      });
+      setBinaryInfo((prev) => {
+        const next = { ...prev };
+        for (const k of Object.keys(next)) if (match(k)) delete next[k];
+        return next;
+      });
+      setDirtyPaths((prev) => {
+        const next = new Set(prev);
+        for (const p of prev) if (match(p)) next.delete(p);
+        return next;
+      });
+    },
+    [releaseUrls]
+  );
 
   const remapTab = useCallback((oldPath: string, newPath: string) => {
     setOpenFiles((prev) =>
@@ -359,6 +416,13 @@ export default function IDE() {
       delete next[oldPath];
       return next;
     });
+    setRawUrls((prev) => {
+      if (!(oldPath in prev)) return prev;
+      const next = { ...prev };
+      next[newPath] = next[oldPath];
+      delete next[oldPath];
+      return next;
+    });
     setDirtyPaths((prev) => {
       if (!prev.has(oldPath)) return prev;
       const next = new Set(prev);
@@ -371,7 +435,7 @@ export default function IDE() {
   // ---- File operations ----
   const doCreate = useCallback(
     async (kind: "newfile" | "newfolder", name: string, dir: string) => {
-      if (!workspaceId || !name.trim()) return;
+      if (!pid || !name.trim()) return;
       const clean = name.trim();
       if (clean.includes("/") || clean === "." || clean === "..") {
         showNotice("Invalid name.");
@@ -379,20 +443,11 @@ export default function IDE() {
       }
       const path = dir ? `${dir}/${clean}` : clean;
       try {
-        const url = `${API_BASE}/api/workspaces/${workspaceId}/file`;
-        const res =
-          kind === "newfile"
-            ? await fetch(url, {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ path, content: "" }),
-              })
-            : await fetch(`${API_BASE}/api/workspaces/${workspaceId}/folder`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ path }),
-              });
-        if (!res.ok) throw new Error(errText(res.status));
+        if (kind === "newfile") {
+          await filesApi.write(pid, path, "");
+        } else {
+          await filesApi.createFolder(pid, path);
+        }
         await refreshTree();
         if (kind === "newfile") {
           const node: FileNode = {
@@ -406,16 +461,16 @@ export default function IDE() {
       } catch (err) {
         console.error("create failed", err);
         showNotice(
-          `Create failed: ${err instanceof Error ? err.message : "error"}`
+          `Create failed: ${err instanceof Error ? describeError(err) : "error"}`
         );
       }
     },
-    [workspaceId, errText, refreshTree, loadFile, showNotice]
+    [pid, refreshTree, loadFile, showNotice]
   );
 
   const doRename = useCallback(
     async (node: FileNode, name: string) => {
-      if (!workspaceId || !name.trim()) return;
+      if (!pid || !name.trim()) return;
       const clean = name.trim();
       if (
         clean.includes("/") ||
@@ -441,15 +496,7 @@ export default function IDE() {
         }
       }
       try {
-        const res = await fetch(
-          `${API_BASE}/api/workspaces/${workspaceId}/file/rename`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path: node.path, newPath }),
-          }
-        );
-        if (!res.ok) throw new Error(errText(res.status));
+        await filesApi.rename(pid, node.path, newPath);
         if (node.type === "file") {
           remapTab(node.path, newPath);
         } else {
@@ -459,16 +506,16 @@ export default function IDE() {
       } catch (err) {
         console.error("rename failed", err);
         showNotice(
-          `Rename failed: ${err instanceof Error ? err.message : "error"}`
+          `Rename failed: ${err instanceof Error ? describeError(err) : "error"}`
         );
       }
     },
-    [workspaceId, errText, refreshTree, remapTab, dropTabsAt, showNotice]
+    [pid, refreshTree, remapTab, dropTabsAt, showNotice]
   );
 
   const doDelete = useCallback(
     async (node: FileNode) => {
-      if (!workspaceId) return;
+      if (!pid) return;
       const dirtyInside = [...dirtyRef.current].some(
         (p) => p === node.path || p.startsWith(node.path + "/")
       );
@@ -482,23 +529,17 @@ export default function IDE() {
         if (!ok) return;
       }
       try {
-        const res = await fetch(
-          `${API_BASE}/api/workspaces/${workspaceId}/file?path=${encodeURIComponent(
-            node.path
-          )}`,
-          { method: "DELETE" }
-        );
-        if (!res.ok) throw new Error(errText(res.status));
+        await filesApi.remove(pid, node.path);
         dropTabsAt(node.path, false);
         await refreshTree();
       } catch (err) {
         console.error("delete failed", err);
         showNotice(
-          `Delete failed: ${err instanceof Error ? err.message : "error"}`
+          `Delete failed: ${err instanceof Error ? describeError(err) : "error"}`
         );
       }
     },
-    [workspaceId, errText, refreshTree, dropTabsAt, showNotice]
+    [pid, refreshTree, dropTabsAt, showNotice]
   );
 
   // ---- Context menu / modal wiring ----
@@ -559,6 +600,7 @@ export default function IDE() {
   const activeBinary: BinaryInfo | undefined = activeFile
     ? binaryInfo[activeFile.path]
     : undefined;
+  const activeImageUrl = activeFile ? rawUrls[activeFile.path] : undefined;
 
   return (
     <div className="flex h-full min-h-0 bg-[#1e1e1e] text-gray-200 overflow-hidden relative">
@@ -734,26 +776,28 @@ export default function IDE() {
                 <span className="text-gray-600">
                   ({activeBinary.size} bytes)
                 </span>
-                <a
-                  className="underline hover:text-gray-200"
-                  target="_blank"
-                  rel="noreferrer"
-                  href={`${API_BASE}/api/workspaces/${workspaceId}/raw?path=${encodeURIComponent(
-                    activeFile.path
-                  )}`}
+                <button
+                  onClick={() => void downloadRaw(activeFile.path)}
+                  className="flex items-center gap-1 underline hover:text-gray-200"
                 >
-                  open raw
-                </a>
+                  <Download size={12} />
+                  download
+                </button>
               </div>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                key={activeFile.path}
-                src={`${API_BASE}/api/workspaces/${workspaceId}/raw?path=${encodeURIComponent(
-                  activeFile.path
-                )}`}
-                alt={activeFile.path}
-                className="max-h-[85%] max-w-[90%] object-contain border border-[#3e3e42] rounded bg-white"
-              />
+              {activeImageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={activeImageUrl}
+                  src={activeImageUrl}
+                  alt={activeFile.path}
+                  className="max-h-[85%] max-w-[90%] object-contain border border-[#3e3e42] rounded bg-white"
+                />
+              ) : (
+                <div className="flex items-center gap-2 text-gray-500 text-sm">
+                  <Loader2 size={18} className="animate-spin" />
+                  Loading image...
+                </div>
+              )}
             </div>
           ) : activeBinary ? (
             <div className="flex items-center justify-center h-full text-gray-500">
@@ -764,16 +808,13 @@ export default function IDE() {
                   {activeFile.path} ({activeBinary.size} bytes). This asset is
                   shown in the project but can only be edited on disk.
                 </p>
-                <a
-                  className="underline text-sm hover:text-gray-300 mt-2 inline-block"
-                  target="_blank"
-                  rel="noreferrer"
-                  href={`${API_BASE}/api/workspaces/${workspaceId}/raw?path=${encodeURIComponent(
-                    activeFile.path
-                  )}`}
+                <button
+                  onClick={() => void downloadRaw(activeFile.path)}
+                  className="flex items-center gap-1 text-sm underline hover:text-gray-300 mt-2 inline-flex"
                 >
+                  <Download size={13} />
                   download raw
-                </a>
+                </button>
               </div>
             </div>
           ) : (

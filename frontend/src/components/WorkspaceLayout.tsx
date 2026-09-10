@@ -1,185 +1,499 @@
 "use client";
 
 import { useState } from "react";
-import { BuildProvider } from "@/context/BuildContext";
+import { AuthProvider, useAuth } from "@/context/AuthContext";
+import { BuildProvider, useBuild } from "@/context/BuildContext";
 import {
-  FolderOpen,
-  Code2,
   ChevronLeft,
   ChevronRight,
+  FolderPlus,
+  FolderOpen,
+  Folder,
+  Loader2,
+  LogOut,
+  Pencil,
   Plus,
+  RefreshCw,
+  Trash2,
+  CloudOff,
 } from "lucide-react";
 import { Navbar } from "@/components/Navbar";
 import { Logo } from "./Logo";
+import { AuthGate } from "./AuthGate";
+import type { Project } from "@/lib/api";
+
+function timeAgo(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "";
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 5) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 1) return `${s}s ago`;
+  const h = Math.floor(m / 60);
+  if (h < 1) return `${m}m ago`;
+  const d = Math.floor(h / 24);
+  if (d < 1) return `${h}h ago`;
+  return `${d}d ago`;
+}
 
 export function ChatWorkspaceLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const [view, setView] = useState<"projects" | "ide">("ide");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  return (
+    <AuthProvider>
+      <BuildProvider>
+        <WorkspaceApp>{children}</WorkspaceApp>
+      </BuildProvider>
+    </AuthProvider>
+  );
+}
+
+function WorkspaceApp({ children }: { children: React.ReactNode }) {
+  const { initializing, user } = useAuth();
+
+  if (initializing) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-[#0a0a0a] text-gray-400">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 size={24} className="animate-spin text-gray-500" />
+          <p className="text-sm">Checking session...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) return <AuthGate />;
+
+  return <WorkspaceShell>{children}</WorkspaceShell>;
+}
+
+type ProjectModal = { kind: "create" } | { kind: "rename"; project: Project } | null;
+
+function WorkspaceShell({ children }: { children: React.ReactNode }) {
+  const {
+    project,
+    projects,
+    projectsLoading,
+    initError,
+    selectProject,
+    createProject,
+    renameProject,
+    deleteProject,
+    refreshProjects,
+    retryInit,
+  } = useBuild();
+  const { user, logout } = useAuth();
+  const [collapsed, setCollapsed] = useState(false);
+  const [projModal, setProjModal] = useState<ProjectModal>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const handleDelete = async (p: Project) => {
+    const ok = window.confirm(
+      `Delete project "${p.name}"? This removes its files and previews.`
+    );
+    if (!ok) return;
+    setDeletingId(p.id);
+    try {
+      await deleteProject(p.id);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Delete failed.");
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   return (
-    <BuildProvider>
-      <div className="flex h-screen w-screen bg-[#0a0a0a] text-gray-200 overflow-hidden">
-        {/* Sidebar */}
-        <div
-          className={`${
-            sidebarCollapsed ? "w-16" : "w-72"
-          } bg-gradient-to-b from-[#111115] to-[#0d0d0f] border-r border-gray-800/50 flex flex-col transition-all duration-300 relative`}
-        >
-          {/* Header */}
-          <div className="h-14 flex items-center justify-between px-4 border-b border-gray-800/50">
-            {!sidebarCollapsed ? (
-              <Logo className="scale-[0.95]" showText />
-            ) : (
-              <Logo className="scale-90" showText={false} />
-            )}
-            <button
-              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              className="p-1.5 hover:bg-white/5 rounded-md transition-colors ml-auto"
-            >
-              {sidebarCollapsed ? (
-                <ChevronRight size={18} />
-              ) : (
-                <ChevronLeft size={18} />
-              )}
-            </button>
-          </div>
-
-          {/* Navigation */}
-          <div className="p-3 space-y-1">
-            <button
-              onClick={() => setView("ide")}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all ${
-                view === "ide"
-                  ? "bg-blue-600/20 text-blue-400 border border-blue-500/30"
-                  : "hover:bg-white/5 text-gray-400"
-              }`}
-            >
-              <Code2 size={20} />
-              {!sidebarCollapsed && <span className="font-medium">Workspace</span>}
-            </button>
-
-            <button
-              onClick={() => setView("projects")}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all ${
-                view === "projects"
-                  ? "bg-emerald-600/20 text-emerald-400 border border-emerald-500/30"
-                  : "hover:bg-white/5 text-gray-400"
-              }`}
-            >
-              <FolderOpen size={20} />
-              {!sidebarCollapsed && <span className="font-medium">Projects</span>}
-            </button>
-          </div>
-
-          {/* Content Area */}
-          {!sidebarCollapsed && (
-            <div className="flex-1 flex flex-col overflow-hidden">
-              <div className="flex-1 px-3 py-4 overflow-auto">
-                {view === "projects" && (
-                  <div className="space-y-3">
-                    <button className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-700 hover:to-cyan-700 rounded-lg transition-all font-medium">
-                      <Plus size={18} />
-                      New Project
-                    </button>
-
-                    <div className="text-xs text-gray-500 px-2 mt-6">
-                      YOUR PROJECTS
-                    </div>
-
-                    <div className="space-y-2">
-                      {["my-flutter-app", "ecommerce-app", "weather-widget", "todo-list"].map(
-                        (name, i) => (
-                          <div
-                            key={i}
-                            className={`p-3 rounded-lg border transition-colors cursor-pointer ${
-                              i === 0
-                                ? "bg-emerald-600/10 border-emerald-500/20 hover:bg-emerald-600/15"
-                                : "hover:bg-white/5 border-transparent hover:border-gray-700/50"
-                            }`}
-                          >
-                            <div className="flex items-start justify-between mb-1">
-                              <p className="text-sm font-medium text-gray-200">{name}</p>
-                              <span
-                                className={`text-xs ${
-                                  i === 0 ? "text-emerald-400" : "text-gray-500"
-                                }`}
-                              >
-                                {i === 0 ? "Active" : "Idle"}
-                              </span>
-                            </div>
-                            <p className="text-xs text-gray-500">
-                              Flutter • Updated {i === 0 ? "5m" : `${i * 2} days`} ago
-                            </p>
-                          </div>
-                        )
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
+    <div className="flex h-screen w-screen bg-[#0a0a0a] text-gray-200 overflow-hidden">
+      {/* Sidebar */}
+      <aside
+        className={`${
+          collapsed ? "w-16" : "w-72"
+        } bg-gradient-to-b from-[#111115] to-[#0d0d0f] border-r border-gray-800/50 flex flex-col transition-all duration-300 relative shrink-0`}
+      >
+        <div className="h-14 flex items-center justify-between px-3 border-b border-gray-800/50 shrink-0">
+          {!collapsed ? (
+            <Logo className="scale-[0.95]" showText />
+          ) : (
+            <Logo className="scale-90" showText={false} />
           )}
+          <button
+            onClick={() => setCollapsed((c) => !c)}
+            className="p-1.5 hover:bg-white/5 rounded-md transition-colors ml-auto"
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+          </button>
+        </div>
 
-          {/* Footer */}
-          {!sidebarCollapsed && (
-            <div className="p-3 border-t border-gray-800/50">
-              <div className="flex items-center gap-3 px-3 py-2 bg-white/5 rounded-lg">
-                <div className="w-8 h-8 bg-gradient-to-br from-emerald-400 to-cyan-500 rounded-full flex items-center justify-center text-xs font-bold text-white">
-                  JD
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-300 truncate">
-                    John Doe
-                  </p>
-                  <p className="text-xs text-gray-500 truncate">Free Plan</p>
-                </div>
-              </div>
-            </div>
+        {/* New project */}
+        <div className="p-3 border-b border-gray-800/50">
+          {collapsed ? (
+            <button
+              onClick={() => setProjModal({ kind: "create" })}
+              className="w-full flex items-center justify-center p-2 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 rounded-lg text-blue-400 transition-colors"
+              title="New project"
+            >
+              <Plus size={18} />
+            </button>
+          ) : (
+            <button
+              onClick={() => setProjModal({ kind: "create" })}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium transition-colors"
+            >
+              <FolderPlus size={16} />
+              New Project
+            </button>
           )}
         </div>
 
-        {/* Main Content Area */}
-        <div className="flex-1 flex flex-col min-w-0">
-          <Navbar />
-
-          <div className="flex-1 overflow-hidden bg-[#0d0d0f] flex">
-            {view === "ide" ? (
-              <>
-                {/* IDE Editor Area */}
-                <div className="flex-1 flex flex-col min-w-0">
-                  <div className="flex-1 overflow-hidden">{children}</div>
+        {/* Project list */}
+        {!collapsed && (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <div className="px-4 pt-4 pb-2 flex items-center justify-between">
+              <span className="text-xs font-semibold text-gray-500 tracking-wide">
+                PROJECTS
+              </span>
+              <button
+                onClick={() => void refreshProjects()}
+                className="p-1 hover:bg-white/5 rounded text-gray-500 hover:text-gray-300"
+                title="Refresh projects"
+              >
+                <RefreshCw size={13} />
+              </button>
+            </div>
+            <div className="flex-1 px-3 pb-3 overflow-y-auto space-y-1.5 min-h-0">
+              {projectsLoading && projects.length === 0 ? (
+                <div className="flex items-center gap-2 text-xs text-gray-500 px-2 py-3">
+                  <Loader2 size={13} className="animate-spin" />
+                  Loading projects...
                 </div>
-              </>
-            ) : (
-              /* Projects View */
-              <div className="flex-1 flex items-center justify-center">
-                <div className="text-center space-y-4 max-w-md px-6">
-                  <div className="w-16 h-16 bg-gradient-to-br from-emerald-500 to-cyan-600 rounded-2xl flex items-center justify-center mx-auto">
-                    <FolderOpen size={32} className="text-white" />
-                  </div>
-                  <h3 className="text-xl font-semibold text-gray-200">
-                    Your Projects
-                  </h3>
-                  <p className="text-gray-400 text-sm">
-                    Select a project from the sidebar to start editing, or create
-                    a new one to begin building.
-                  </p>
+              ) : projects.length === 0 ? (
+                <p className="text-xs text-gray-500 px-2 py-3">
+                  No projects yet. Create one to start building.
+                </p>
+              ) : (
+                projects.map((p) => {
+                  const active = project?.id === p.id;
+                  const deleting = deletingId === p.id;
+                  return (
+                    <div
+                      key={p.id}
+                      onClick={() => void selectProject(p.id)}
+                      className={`group cursor-pointer rounded-lg border px-3 py-2.5 transition-colors ${
+                        active
+                          ? "bg-blue-600/10 border-blue-500/25"
+                          : "border-transparent hover:bg-white/5 hover:border-gray-700/60"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        {deleting ? (
+                          <Loader2 size={15} className="animate-spin text-gray-400 shrink-0" />
+                        ) : (
+                          <Folder
+                            size={15}
+                            className={`shrink-0 ${
+                              active ? "text-blue-400" : "text-gray-500"
+                            }`}
+                          />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <p
+                            className={`text-sm truncate ${
+                              active ? "text-blue-300" : "text-gray-200"
+                            }`}
+                          >
+                            {p.name}
+                          </p>
+                          <p className="text-[11px] text-gray-500">
+                            Updated {timeAgo(p.updated_at) || "recently"}
+                          </p>
+                        </div>
+                        {!deleting && (
+                          <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setProjModal({ kind: "rename", project: p });
+                              }}
+                              className="p-1 hover:bg-white/10 rounded text-gray-400 hover:text-gray-200"
+                              title="Rename"
+                            >
+                              <Pencil size={12} />
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleDelete(p);
+                              }}
+                              className="p-1 hover:bg-red-500/20 rounded text-gray-400 hover:text-red-400"
+                              title="Delete"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* User footer */}
+        <div className="p-3 border-t border-gray-800/50 shrink-0">
+          {collapsed ? (
+            <button
+              onClick={() => void logout()}
+              className="w-full flex items-center justify-center p-2 hover:bg-white/5 rounded-lg text-gray-400"
+              title="Sign out"
+            >
+              <LogOut size={17} />
+            </button>
+          ) : (
+            <div className="flex items-center gap-3 px-3 py-2 bg-white/5 rounded-lg">
+              <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-xs font-bold text-white uppercase shrink-0">
+                {user?.email?.charAt(0) ?? "U"}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-gray-300 truncate">{user?.email}</p>
+              </div>
+              <button
+                onClick={() => void logout()}
+                className="p-1.5 hover:bg-white/10 rounded text-gray-400 hover:text-gray-200"
+                title="Sign out"
+              >
+                <LogOut size={15} />
+              </button>
+            </div>
+          )}
+        </div>
+      </aside>
+
+      {/* Main */}
+      <div className="flex-1 flex flex-col min-w-0">
+        <Navbar />
+
+        <div className="flex-1 overflow-hidden bg-[#0d0d0f] flex min-h-0">
+          {initError ? (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center space-y-4 max-w-md px-6">
+                <div className="w-16 h-16 bg-red-500/10 border border-red-500/30 rounded-2xl flex items-center justify-center mx-auto">
+                  <CloudOff size={30} className="text-red-400" />
+                </div>
+                <h3 className="text-xl font-semibold text-gray-200">
+                  Can&apos;t reach the backend
+                </h3>
+                <p className="text-gray-400 text-sm">{initError}</p>
+                <div className="flex justify-center gap-3">
                   <button
-                    onClick={() => setView("ide")}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors text-sm font-medium"
+                    onClick={retryInit}
+                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors text-sm font-medium"
                   >
-                    Go to Workspace
+                    <RefreshCw size={15} />
+                    Retry
                   </button>
                 </div>
               </div>
-            )}
-          </div>
+            </div>
+          ) : project ? (
+            <div
+              key={project.id}
+              className="flex-1 flex flex-col min-w-0 overflow-hidden"
+            >
+              {children}
+            </div>
+          ) : (
+            <NoProjectView onOpenProject={(id) => void selectProject(id)} />
+          )}
         </div>
       </div>
-    </BuildProvider>
+
+      {projModal && (
+        <ProjectModalView
+          kind={projModal.kind}
+          project={projModal.kind === "rename" ? projModal.project : null}
+          onCancel={() => setProjModal(null)}
+          onSubmit={async (name) => {
+            if (projModal.kind === "rename" && projModal.project) {
+              await renameProject(projModal.project.id, name);
+            } else {
+              await createProject(name);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function NoProjectView({
+  onOpenProject,
+}: {
+  onOpenProject: (id: string) => void;
+}) {
+  const { projects, projectsLoading, createProject, renameProject } = useBuild();
+  const [projModal, setProjModal] = useState<ProjectModal>(null);
+
+  return (
+    <div className="flex-1 flex items-center justify-center">
+      <div className="text-center space-y-4 max-w-md px-6">
+        <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto">
+          <FolderOpen size={30} className="text-white" />
+        </div>
+        {projectsLoading ? (
+          <div className="flex items-center justify-center gap-2 text-gray-400 text-sm">
+            <Loader2 size={16} className="animate-spin" />
+            Loading your projects...
+          </div>
+        ) : projects.length > 0 ? (
+          <>
+            <h3 className="text-xl font-semibold text-gray-200">
+              Select a project
+            </h3>
+            <p className="text-gray-400 text-sm">
+              Choose a project below to open its workspace.
+            </p>
+            <div className="space-y-2 mt-2 text-left max-h-64 overflow-auto">
+              {projects.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => onOpenProject(p.id)}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg border border-gray-800 bg-white/5 hover:bg-white/10 transition-colors text-left"
+                >
+                  <Folder size={16} className="text-blue-400 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-gray-200 truncate">
+                      {p.name}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Updated {timeAgo(p.updated_at) || "recently"}
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <>
+            <h3 className="text-xl font-semibold text-gray-200">
+              Create your first project
+            </h3>
+            <p className="text-gray-400 text-sm">
+              You don&apos;t have any projects yet. Scaffold a fresh Flutter app
+              in seconds and start building with AI.
+            </p>
+          </>
+        )}
+        <div>
+          <button
+            onClick={() => setProjModal({ kind: "create" })}
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors text-sm font-medium"
+          >
+            <Plus size={16} />
+            New Project
+          </button>
+        </div>
+      </div>
+
+      {projModal && (
+        <ProjectModalView
+          kind={projModal.kind}
+          project={projModal.kind === "rename" ? projModal.project : null}
+          onCancel={() => setProjModal(null)}
+          onSubmit={async (name) => {
+            if (projModal.kind === "rename" && projModal.project) {
+              await renameProject(projModal.project.id, name);
+            } else {
+              await createProject(name);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ProjectModalView({
+  kind,
+  project,
+  onCancel,
+  onSubmit,
+}: {
+  kind: "create" | "rename";
+  project: Project | null;
+  onCancel: () => void;
+  onSubmit: (name: string) => Promise<void>;
+}) {
+  const [value, setValue] = useState(project?.name ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    const name = value.trim();
+    if (!name || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onSubmit(name);
+      onCancel();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Request failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50">
+      <div className="bg-[#252526] border border-[#3e3e42] rounded-lg shadow-2xl p-4 w-96">
+        <p className="text-sm font-medium text-gray-200 mb-1">
+          {kind === "create" ? "New project" : "Rename project"}
+        </p>
+        {kind === "create" && (
+          <p className="text-xs text-gray-500 mb-3">
+            A Flutter project is scaffolded on the server. First creation can
+            take a little while.
+          </p>
+        )}
+        <input
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void submit();
+            if (e.key === "Escape") onCancel();
+          }}
+          disabled={busy}
+          className="w-full bg-[#1e1e1e] border border-[#3e3e42] rounded px-3 py-1.5 text-sm text-gray-200 outline-none focus:border-blue-500/60 disabled:opacity-60"
+          placeholder="My Flutter App"
+        />
+        {error && (
+          <p className="text-xs text-red-400 mt-2 bg-red-950/40 border border-red-900 rounded px-2 py-1.5">
+            {error}
+          </p>
+        )}
+        <div className="flex justify-end gap-2 mt-4">
+          <button
+            onClick={onCancel}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm rounded border border-[#3e3e42] hover:bg-[#1e1e1e] disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => void submit()}
+            disabled={busy}
+            className="flex items-center gap-2 px-3 py-1.5 text-sm rounded bg-blue-600 hover:bg-blue-700 disabled:opacity-60 font-medium"
+          >
+            {busy && <Loader2 size={13} className="animate-spin" />}
+            {busy ? (kind === "create" ? "Scaffolding..." : "Saving...") : "OK"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

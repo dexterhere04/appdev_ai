@@ -8,14 +8,39 @@ Gemini + LangChain config with built-in LangSmith tracing.
 
 import os
 import threading
-from dotenv import load_dotenv
+from pathlib import Path
+
+from dotenv import load_dotenv, dotenv_values
 
 load_dotenv()
 
 # -------------------------------------------------------------------------
 # 🧠 Environment Validation
 # -------------------------------------------------------------------------
-API_KEY = os.getenv("GEMINI_API_KEY")
+_ENV_FILE = Path(__file__).with_name(".env")
+
+
+def _env_value(name: str) -> str | None:
+    """Read an env var, tolerating an empty value injected by the container.
+
+    `docker compose` passes `GEMINI_API_KEY: ${GEMINI_API_KEY:-}` from the root
+    `.env`. When that root var is unset this injects an *empty* string, which
+    shadows the real key in `backend/.env` because `load_dotenv()` never
+    overrides existing environment entries. Treat empty as unset and fall back
+    to the file's value directly (without mutating os.environ, which would also
+    clobber lazily-read secrets like FCB_SECRET).
+    """
+    value = os.getenv(name)
+    if value:
+        return value
+    # Only consult the file when the var exists but is empty. A var that is
+    # genuinely unset (e.g. popped by a test) stays unset.
+    if name in os.environ and _ENV_FILE.exists():
+        return dotenv_values(_ENV_FILE).get(name) or None
+    return None
+
+
+API_KEY = _env_value("GEMINI_API_KEY")
 if not API_KEY:
     raise EnvironmentError("❌ Missing GEMINI_API_KEY in environment (.env)")
 
@@ -44,7 +69,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 genai.configure(api_key=API_KEY)
 
 
-def _safe_list_models(timeout: float = 3.0):
+def _safe_list_models(timeout: float = 8.0):
     """Fetch model list safely without blocking startup."""
     result, err = [], [None]
 
@@ -66,39 +91,63 @@ _all_models = _safe_list_models()
 _available = [m.name for m in _all_models] if _all_models else []
 
 
-def _pick(candidates):
-    for name in candidates:
-        if name in _available:
-            return name
-    return candidates[0]
-
-
 # -------------------------------------------------------------------------
 # 🎯 Model Selection per Role
 # -------------------------------------------------------------------------
-MODELS = {
-    "planner": _pick([
-        "models/gemini-2.5-pro",
-        "models/gemini-2.5-pro-preview-06-05",
-        "models/gemini-pro-latest",
-    ]),
-    "codewriter": _pick([
-        "models/gemini-2.5-flash",
+# Models per role, free-tier-safe first. The first entry the key can list
+# becomes the primary; the rest stay as runtime fallbacks via `with_fallbacks`,
+# which covers models that list fine but fail at call time — a retired model
+# (404) or a tier with zero quota (429). Pro models are included last because a
+# free-tier key has zero Pro quota: trying one first burns ~90s in internal
+# 429 retries before the fallback even runs. Set FCB_GEMINI_PREFER_PRO=1 to
+# promote Pro to the front (for keys with billing enabled).
+_MODEL_CANDIDATES = {
+    "planner": [
         "models/gemini-flash-latest",
-    ]),
-    "reviewer": _pick([
-        "models/gemini-2.5-pro",
+        "models/gemini-3.5-flash",
         "models/gemini-pro-latest",
-    ]),
-    "stylist": _pick([
-        "models/gemini-2.5-flash-lite",
+        "models/gemini-3.1-pro-preview",
+    ],
+    "codewriter": [
+        "models/gemini-flash-latest",
+        "models/gemini-3.5-flash",
+        "models/gemini-pro-latest",
+    ],
+    "reviewer": [
+        "models/gemini-flash-latest",
+        "models/gemini-3.5-flash",
+        "models/gemini-pro-latest",
+        "models/gemini-3.1-pro-preview",
+    ],
+    "stylist": [
         "models/gemini-flash-lite-latest",
-    ]),
-    "coordinator": _pick([
+        "models/gemini-3.5-flash-lite",
+        "models/gemini-flash-latest",
+    ],
+    "coordinator": [
+        "models/gemini-flash-latest",
+        "models/gemini-3.5-flash",
         "models/gemini-pro-latest",
-        "models/gemini-2.5-pro",
-    ]),
+        "models/gemini-3.1-pro-preview",
+    ],
 }
+
+_PREFER_PRO = os.getenv("FCB_GEMINI_PREFER_PRO", "false").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
+
+def _ordered_candidates(role: str) -> list[str]:
+    """Candidates for `role`: preferred tier first, then models the key can list."""
+    cands = _MODEL_CANDIDATES.get(role, _MODEL_CANDIDATES["coordinator"])
+    if _PREFER_PRO:
+        cands = [m for m in cands if "pro" in m] + [m for m in cands if "pro" not in m]
+    listed = [m for m in cands if m in _available]
+    unlisted = [m for m in cands if m not in _available]
+    return (listed + unlisted) if listed else list(cands)
+
+
+MODELS = {role: _ordered_candidates(role)[0] for role in _MODEL_CANDIDATES}
 
 
 # -------------------------------------------------------------------------
@@ -109,17 +158,14 @@ def get_model_for(role: str) -> str:
     return MODELS.get(role, MODELS["coordinator"])
 
 
-def get_runnable_llm(
-    role: str,
+def _build_model(
+    model_id: str,
     *,
-    temperature: float = 0.6,
-    streaming: bool = False,
-    retry: int = 1,
-    max_output_tokens: int | None = None,
+    temperature: float,
+    streaming: bool,
+    retry: int,
+    max_output_tokens: int | None,
 ):
-    """Builds and returns a ChatGoogleGenerativeAI runnable."""
-    model_id = get_model_for(role)
-
     llm = ChatGoogleGenerativeAI(
         model=model_id,
         api_key=API_KEY,
@@ -141,6 +187,37 @@ def get_runnable_llm(
         pass
 
     return llm
+
+
+def get_runnable_llm(
+    role: str,
+    *,
+    temperature: float = 0.6,
+    streaming: bool = False,
+    retry: int = 1,
+    max_output_tokens: int | None = None,
+):
+    """Build a ChatGoogleGenerativeAI runnable with model fallbacks.
+
+    If the preferred model errors at call time (retired → 404, or no quota on
+    this tier → 429), LangChain transparently retries with the next candidate.
+    """
+    candidates = _ordered_candidates(role)
+    runnables = [
+        _build_model(
+            model_id,
+            temperature=temperature,
+            streaming=streaming,
+            retry=retry,
+            max_output_tokens=max_output_tokens,
+        )
+        for model_id in candidates
+    ]
+
+    primary, *fallbacks = runnables
+    if fallbacks:
+        primary = primary.with_fallbacks(fallbacks)
+    return primary
 
 
 # -------------------------------------------------------------------------

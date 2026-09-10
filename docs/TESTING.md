@@ -90,3 +90,17 @@ and `next build`s cleanly; and the API contract between them is now aligned
 single build-complete signal, preview iframe driven by the build response).
 
 Full issue list (all fixed): [`issues.md`](../issues.md).
+
+## Automated suite (added by the v1 agents)
+
+A pytest suite now lives in `backend/tests/` (fast, no flutter required unless
+marked `integration`) and Playwright money-path E2E in `frontend/e2e/`. Run:
+
+```bash
+cd backend && python -m pytest          # 33 tests
+cd frontend && npx playwright test      # money path (needs running backend+frontend)
+```
+
+Coverage: auth/ownership (401/403), path traversal, preview-token gating, file
+ops, project CRUD, SSE single-sentinel protocol (fake flutter), env-secret
+allowlist, GC, rate limiting, AI fallback + validation.
